@@ -2,102 +2,96 @@
 
 Express + Mongoose + Socket.IO backend for AidPulse.
 
-- **Auth**: JWT (bcrypt hashed passwords, bcryptjs).
-- **Realtime**: Socket.IO with token handshake auth and role-based rooms.
-- **Geo**: MongoDB `2dsphere` index for `$near` / `$geoNear` queries, duplicate detection, and coverage-gap aggregation.
-- **Integrity**: claims are a single atomic `findOneAndUpdate`; claim history is an append-only `claimaudits` collection.
+- **Auth**: JWT with bcrypt-hashed passwords. Citizens sign in by phone; NGOs and government sign in by email.
+- **Realtime**: Socket.IO with a token handshake and rooms derived only from the verified database role.
+- **Geo**: MongoDB `2dsphere` index for `$geoNear` merge detection.
+- **Integrity**: claims are a single conditional `updateOne` (`$elemMatch`), never read-then-write. Audit rows are written *before* socket events. `claimaudits` is append-only (model hooks reject update/delete).
 
 ## Quick start
 
 ```bash
 cd backend
 npm install
-cp .env.example .env      # then edit values
-npm run seed              # create demo users + sample reports
+cp .env.example .env      # then edit values (at minimum JWT_SECRET)
+npm run mongo:dev         # in-memory MongoDB for local development
+npm run reset:dev         # clean slate: drop collections + rebuild indexes
 npm run dev               # http://localhost:4000
 ```
+
+On first start the government account is created from `GOV_EMAIL` / `GOV_PASSWORD`
+**only if no government user exists**. It is never overwritten and the password is
+never logged. The account has `mustChangePassword=true`.
 
 ## Scripts
 
 | Script | Description |
 | --- | --- |
-| `npm run dev` | Start with nodemon (auto-reload) |
-| `npm start` | Start production server |
-| `npm run seed` | Seed demo users and reports (idempotent upsert by email) |
-| `npm test` | Run the full end-to-end suite (in-memory MongoDB, no DB required) |
-| `npm run test:smoke` | HTTP/API integration checks |
-| `npm run test:realtime` | Socket.IO auth/rooms/events + stale-claim sweeper |
+| `npm run dev` | Start with nodemon |
+| `npm start` | Start the server |
+| `npm run mongo:dev` | Boot an ephemeral local MongoDB |
+| `npm run reset:dev` | Drop collections and rebuild indexes (refuses production) |
+| `npm run bootstrap:gov` | Manually create the government account (env or CLI args) |
+| `npm run seed` | **Manual** demo data — refuses `NODE_ENV=production` |
+| `npm test` / `npm run check:flow` | Full end-to-end suite (spawns Mongo + API) |
+| `npm run check:flow -- --core` | Service/DB-level tests only (no HTTP) |
+| `npm run check:flow -- --atlas` | Full suite against a throwaway Atlas database (needs `ATLAS_TEST_URI`) |
 
-### Running the tests
+The test suite is the only automatic way data is created; nothing in the server
+bootstrap inserts sample users or reports.
 
-`npm test` boots an in-memory MongoDB (`mongodb-memory-server`) and the real
-HTTP + Socket.IO server, then drives them end-to-end. No external database or
-network is required after the first run (the mongod binary is cached locally).
+### Running against MongoDB Atlas
 
-### Local MongoDB with Docker
+Point `ATLAS_TEST_URI` at a cluster URI **without** a database name, then pass `--atlas`:
 
 ```bash
-npm run dev            # in one terminal (needs a running MongoDB)
-docker compose up -d   # in another, if you don't have MongoDB installed
+ATLAS_TEST_URI="mongodb+srv://user:pass@cluster.mongodb.net/?retryWrites=true" \
+  npm run check:flow -- --atlas
 ```
 
-## API
+The script appends its own `aidpulse_test_<timestamp>` database name and **drops that database
+in a `finally` block**, even when a check fails. As a guard rail it refuses to connect to,
+reset or drop any database whose name does not start with `aidpulse_test_`, and it uses
+generous (60 s) timeouts. The default `npm test` run stays fully offline on an in-memory
+MongoDB.
 
-### Auth — `/api/auth`
-| Method | Path | Auth | Notes |
-| --- | --- | --- | --- |
-| POST | `/register` | – | `{ name, email, password, role?, phone?, organizationName? }`. `admin` can never be self-assigned. |
-| POST | `/login` | – | `{ email, password }` → `{ id, name, email, role, token }` |
-| GET | `/me` | JWT | Current user |
+## Environment
 
-### Reports — `/api/reports`
-| Method | Path | Auth | Notes |
-| --- | --- | --- | --- |
-| POST | `/` | citizen | Create report; runs duplicate detection; rate limited |
-| GET | `/` | ngo/gov/admin | Filters: `status`, `needType`, `limit` |
-| GET | `/mine` | any | Reports created by caller |
-| GET | `/nearby?lat&lng&maxDistance` | ngo/gov/admin | `$geoNear` sorted by distance |
-| PATCH | `/:id/claim` | ngo | Atomic claim → `409` if already taken |
-| PATCH | `/:id/release` | ngo/admin | Release a claim |
-| PATCH | `/:id/status` | ngo/gov/admin | `{ status }` |
+See `.env.example` for the full annotated list.
 
-> `POST /:id/claim` and `POST /:id/release` are also accepted (frontend compatibility).
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `MONGO_URI` | yes | MongoDB connection string |
+| `JWT_SECRET` | yes | JWT signing secret (strong value required in production) |
+| `JWT_EXPIRES_IN` | no | Token lifetime (default `1h`) |
+| `CLIENT_ORIGIN` | yes | CORS + Socket.IO origin |
+| `GOV_EMAIL`, `GOV_PASSWORD` | yes (prod) | One-time government bootstrap credentials |
+| `IDENTITY_MODE` | no | `basic` (default) or `digilocker` |
+| `PORT` | no | HTTP port (default `4000`) |
+| `BCRYPT_ROUNDS` | no | Cost factor (default `12`) |
+| `STALE_CLAIM_HOURS` | no | Claims idle longer than this are force-released (default `4`) |
+| `STALE_SWEEP_MINUTES` | no | Sweeper interval (default `15`) |
+| `GAP_THRESHOLD_MINUTES` | no | Pending-age floor for gap cells (default `30`) |
+| `GAP_CELL_THRESHOLD` | no | Pending needs per 0.01° cell before an alert (default `3`) |
+| `GAP_SCAN_MINUTES` | no | Gap scanner interval (default `5`) |
 
-### Admin — `/api/admin`
-| Method | Path | Auth | Notes |
-| --- | --- | --- | --- |
-| GET | `/duplicates` | admin | Duplicate clusters |
-| GET | `/gaps` | admin | Coverage-gap cells |
-| GET | `/audit/:id` | admin | Claim audit trail for a report |
-| PATCH | `/users/:id/suspend` | admin | `{ suspended?: boolean }` (default `true`) |
+DigiLocker credentials are **only** required when `IDENTITY_MODE=digilocker`;
+in `basic` mode they are never demanded and the identity routes return `501`
+without breaking anything else.
 
-### SMS — `/api/sms`
-| Method | Path | Auth | Notes |
-| --- | --- | --- | --- |
-| POST | `/inbound` | `x-api-key` | Parses `"NEED, location text"` into a report with `source: sms` |
+## Documentation
 
-### Frontend compatibility shim (also mounted)
-`GET /api/users`, `POST /api/users/:id/suspend`, `POST /api/users/:id/restore`,
-`GET /api/stats/overview`, `GET /api/stats/gaps`, `GET /api/stats/clusters`,
-`GET /api/health`.
+- **[API.md](./API.md)** — full endpoint reference, error codes, and Socket.IO contract.
 
-## Socket.IO
+## Data model
 
-Connect with `io(url, { auth: { token } })`. Rooms are joined from the **verified role only**:
+- `users` — `name`, `phone` (unique-sparse), `email` (unique-sparse), `passwordHash`,
+  `role` (`citizen` | `ngo` | `government`), `capabilities[]`, `organizationName`,
+  `identityVerified`, `verifiedName`, `identityRefHash`, `consentAt`,
+  `mustChangePassword`, `isSuspended`. No Aadhaar number is ever stored.
+- `reports` — `reportedBy`, `clientId`, `location` (GeoJSON Point, `2dsphere`),
+  `accuracyMeters`, `needs[]` (per-need `status`/`claimedBy`/`claimedAt`/`resolvedAt`/`updatedAt`),
+  `mergedInto`, `reporterCount`, `flags[]`, `createdAt`.
+- `claimaudits` — append-only: `reportId`, `needType`, `actorId`, `action`, `timestamp`.
 
-| Role | Room |
-| --- | --- |
-| ngo | `ngo-room` |
-| government | `control-room` |
-| admin | `admin-room` |
-| any | `user:<id>` |
-
-Server → client events: `report:new`, `report:claimed`, `report:status_updated`, `report:released`, `gap:alert`.
-
-## Data integrity guarantees
-
-1. **Atomic claim** — a single conditional `findOneAndUpdate`; two NGOs can never claim the same case.
-2. **Duplicate detection** — new reports within 150 m and 2 h of an existing open report of the same need type get `duplicateOf` set and increment the original's `duplicateCount`.
-3. **Audit-then-emit** — a `claimaudits` row is written *before* the socket event is emitted.
-4. **Stale-claim sweeper** — cron job reverts claims idle longer than `STALE_CLAIM_HOURS` and logs `force_released`.
-5. **Append-only audit** — `claimaudits` has no update/delete routes and model hooks reject mutation.
+Indexes: `location` `2dsphere`; unique `{reportedBy, clientId}` (partial);
+`{mergedInto, createdAt}`; unique-sparse `phone` and `email`.

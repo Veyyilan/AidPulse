@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { NEED_TYPES, REPORT_STATUSES, REPORT_SOURCES } from '../config/constants.js';
+import { NEED_TYPES, NEED_STATUSES } from '../config/constants.js';
 
 const { Schema } = mongoose;
 
@@ -18,42 +18,62 @@ const pointSchema = new Schema(
   { _id: false },
 );
 
+/**
+ * A single requested need on a report. `updatedAt` tracks the last status
+ * change so the stale-claim sweeper can find claims with "no update".
+ */
+const needSchema = new Schema(
+  {
+    type: { type: String, enum: NEED_TYPES, required: true },
+    status: { type: String, enum: NEED_STATUSES, default: 'pending', required: true },
+    claimedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+    claimedAt: { type: Date, default: null },
+    resolvedAt: { type: Date, default: null },
+    updatedAt: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
 const reportSchema = new Schema(
   {
     reportedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    // Client-generated idempotency key so a retried (offline) submission never
-    // creates a second report. Absent for operator/SMS-sourced reports.
-    clientId: { type: String, default: undefined, trim: true, maxlength: 100 },
-    needType: { type: String, enum: NEED_TYPES, required: true },
-    description: { type: String, required: true, trim: true, minlength: 10, maxlength: 500 },
+
+    // Client-generated idempotency key. Optional. Unique per reporter.
+    clientId: { type: String, trim: true, maxlength: 100 },
+
     location: { type: pointSchema, required: true },
     accuracyMeters: { type: Number, default: null, min: 0 },
-    status: {
-      type: String,
-      enum: REPORT_STATUSES,
-      default: 'pending',
+
+    // Non-empty set of unique need types (validated in the service layer too).
+    needs: {
+      type: [needSchema],
       required: true,
-      index: true,
+      validate: {
+        validator: (v) => Array.isArray(v) && v.length > 0,
+        message: 'needs must be a non-empty list',
+      },
     },
-    claimedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null, index: true },
-    claimedAt: { type: Date, default: null },
-    resolvedAt: { type: Date, default: null },
-    duplicateOf: { type: Schema.Types.ObjectId, ref: 'Report', default: null, index: true },
-    duplicateCount: { type: Number, default: 0, min: 0 },
-    source: { type: String, enum: REPORT_SOURCES, default: 'app' },
+
+    // Points at the primary report this one was merged into. Depth is always 1.
+    mergedInto: { type: Schema.Types.ObjectId, ref: 'Report', default: null },
+
+    // 1 for a lone report; +1 for every report merged into it.
+    reporterCount: { type: Number, default: 1, min: 1 },
+
+    // e.g. 'low_accuracy', 'excessive_merges' — for government review.
+    flags: { type: [String], default: [] },
+
     createdAt: { type: Date, default: Date.now },
   },
   { versionKey: false },
 );
 
-// Geospatial index powering $near / $geoNear (nearby + duplicate detection).
+// Geospatial index powering $geoNear / $near (merge detection).
 reportSchema.index({ location: '2dsphere' });
-// Compound index for the live feed filters.
-reportSchema.index({ status: 1, needType: 1, createdAt: -1 });
-// Idempotency: at most one report per (user, client-generated id). Scoped to the
-// reporting user so two different users may reuse the same clientId without
-// either ever receiving the other's report. Partial index so reports without a
-// clientId (SMS/operator) are not indexed and never collide.
+// Feed + merge-target queries: open primaries ordered by age.
+reportSchema.index({ mergedInto: 1, createdAt: -1 });
+// Idempotency: at most one report per (user, client id). Partial so reports
+// without a clientId (allowed) are never indexed and never collide.
 reportSchema.index(
   { reportedBy: 1, clientId: 1 },
   { unique: true, partialFilterExpression: { clientId: { $exists: true } } },

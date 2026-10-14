@@ -1,251 +1,179 @@
 import { Router } from 'express';
-import { body, query, param } from 'express-validator';
+import { body, param, query } from 'express-validator';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
 import { handleValidation } from '../middleware/validate.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireRole } from '../middleware/roles.js';
 import { createReportLimiter } from '../middleware/rateLimit.js';
-import { isValidLatLng, isInsideRegion } from '../utils/geo.js';
-import { serializeReport, serializeReports } from '../utils/serialize.js';
-import { emitToRooms } from '../realtime/index.js';
-import {
-  NEED_TYPES,
-  REPORT_STATUSES,
-  OPERATIONAL_ROOMS,
-} from '../config/constants.js';
+import { serializeReport } from '../utils/serialize.js';
+import { isInsideRegion, isValidLatLng } from '../utils/geo.js';
+import { NEED_TYPES, NEED_STATUSES, REGION_BOUNDS } from '../config/constants.js';
 import {
   createReport,
-  getReportById,
-  claimReport,
-  releaseReport,
-  updateReportStatus,
-  listReports,
-  listMine,
-  listNearby,
-  detectAndEmitGap,
   findReportByClientId,
+  listFeed,
+  listMine,
+  claimNeed,
+  updateNeedStatus,
+  releaseNeed,
 } from '../services/reportService.js';
 
 const router = Router();
 
-// Normalise a need type coming from the client ("Medical" -> "medical").
-function normalizeNeedType(value) {
-  return String(value ?? '').trim().toLowerCase();
+router.use(requireAuth);
+
+/**
+ * Idempotency runs BEFORE the rate limiter. A retry with the same
+ * (user, clientId) returns the originally created report with 200 and never
+ * consumes rate-limit budget.
+ */
+async function idempotencyCheck(req, res, next) {
+  try {
+    const clientId = req.body?.clientId;
+    if (!clientId) return next();
+
+    const existing = await findReportByClientId(clientId, req.user._id);
+    if (existing) {
+      req.idempotentReport = existing;
+      return res.status(200).json(serializeReport(existing));
+    }
+    return next();
+  } catch (err) {
+    return next(err);
+  }
 }
 
-// Persisted statuses a client may set (frontend sends pending/claimed/resolved).
-const SETTABLE_STATUSES = ['pending', 'claimed', 'in_progress', 'resolved', 'cannot_fulfill'];
-
-// ─── POST /api/reports ──────────────────────────────────────────────────────
+// ─── Create ────────────────────────────────────────────────────────────────
 router.post(
   '/',
-  requireAuth,
-  requireRole('citizen', 'admin'),
+  idempotencyCheck,
   createReportLimiter,
   [
-    body('needType').customSanitizer(normalizeNeedType).isIn(NEED_TYPES),
-    body('description').isString().trim().isLength({ min: 10, max: 500 }),
-    body('lat').isFloat({ min: -90, max: 90 }).toFloat(),
-    body('lng').isFloat({ min: -180, max: 180 }).toFloat(),
-    body('accuracyMeters').optional({ nullable: true }).isFloat({ min: 0 }).toFloat(),
-    body('accuracy').optional({ nullable: true }).isFloat({ min: 0 }).toFloat(),
-    body('clientId').optional({ nullable: true }).isString().trim().isLength({ min: 1, max: 100 }),
+    body('needs').isArray({ min: 1 }).withMessage('needs must be a non-empty array'),
+    body('needs.*').isIn(NEED_TYPES).withMessage(`each need must be one of: ${NEED_TYPES.join(', ')}`),
+    body('lat')
+      .isFloat({ min: REGION_BOUNDS.minLat, max: REGION_BOUNDS.maxLat })
+      .withMessage(`lat must be within ${REGION_BOUNDS.minLat}–${REGION_BOUNDS.maxLat} (Tamil Nadu)`),
+    body('lng')
+      .isFloat({ min: REGION_BOUNDS.minLng, max: REGION_BOUNDS.maxLng })
+      .withMessage(`lng must be within ${REGION_BOUNDS.minLng}–${REGION_BOUNDS.maxLng} (Tamil Nadu)`),
+    body('accuracyMeters').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('clientId').optional({ nullable: true }).isString().isLength({ min: 1, max: 100 }),
   ],
   handleValidation,
   asyncHandler(async (req, res) => {
-    const { needType, description, lat, lng } = req.body;
-    const accuracyMeters = req.body.accuracyMeters ?? req.body.accuracy ?? null;
-    const clientId = req.body.clientId || undefined;
+    const { needs, lat, lng, accuracyMeters, clientId } = req.body;
 
-    if (!isValidLatLng(lat, lng)) {
-      throw ApiError.unprocessable('Invalid coordinates', [
-        { field: 'lat/lng', message: 'Coordinates out of range' },
-      ]);
-    }
-    // Reject coordinates outside Tamil Nadu (or configured deployment region).
-    if (!isInsideRegion(lat, lng)) {
-      throw ApiError.unprocessable('Location outside Tamil Nadu deployment region (lat 7.9–13.7, lng 76.1–80.5)', [
-        { field: 'lat/lng', message: 'Report location must be within Tamil Nadu (lat 7.9–13.7, lng 76.1–80.5)' },
-      ]);
+    // Defence in depth: validate again in case the route is reused.
+    if (!isValidLatLng(Number(lat), Number(lng)) || !isInsideRegion(Number(lat), Number(lng))) {
+      throw ApiError.unprocessable('Location is outside the supported region (Tamil Nadu)');
     }
 
-    // Idempotency: return this user's existing report if clientId was reused.
-    if (clientId) {
-      const existing = await findReportByClientId(clientId, req.user._id);
-      if (existing) {
-        return res.status(200).json(serializeReport(existing));
-      }
-    }
-
-    let report;
-    try {
-      report = await createReport({
-        userId: req.user._id,
-        needType,
-        description,
-        lat,
-        lng,
-        accuracyMeters,
-        source: 'app',
-        clientId,
-      });
-    } catch (err) {
-      if (err.code === 11000 && clientId) {
-        const existing = await findReportByClientId(clientId, req.user._id);
-        if (existing) {
-          return res.status(200).json(serializeReport(existing));
-        }
-      }
-      throw err;
-    }
-
-    const payload = serializeReport(report, { distanceKm: 0 });
-    emitToRooms(OPERATIONAL_ROOMS, 'report:new', payload);
-
-    // Detect a coverage gap around the new report (may emit gap:alert).
-    detectAndEmitGap(lat, lng).catch(() => {});
-
-    res.status(201).json(payload);
-  }),
-);
-
-// ─── GET /api/reports/mine ──────────────────────────────────────────────────
-router.get(
-  '/mine',
-  requireAuth,
-  asyncHandler(async (req, res) => {
-    const reports = await listMine(req.user._id);
-    res.json(serializeReports(reports));
-  }),
-);
-
-// ─── GET /api/reports/nearby ────────────────────────────────────────────────
-router.get(
-  '/nearby',
-  requireAuth,
-  requireRole('ngo', 'government', 'admin'),
-  [
-    query('lat').isFloat({ min: -90, max: 90 }).toFloat(),
-    query('lng').isFloat({ min: -180, max: 180 }).toFloat(),
-    query('maxDistance').optional().isFloat({ min: 1 }).toFloat(),
-  ],
-  handleValidation,
-  asyncHandler(async (req, res) => {
-    const { lat, lng, maxDistance } = req.query;
-    const results = await listNearby({
-      lat,
-      lng,
-      maxDistanceM: maxDistance || 50000,
+    const { report } = await createReport({
+      userId: req.user._id,
+      needs,
+      lat: Number(lat),
+      lng: Number(lng),
+      accuracyMeters: accuracyMeters === undefined || accuracyMeters === null ? null : Number(accuracyMeters),
+      clientId,
     });
-    res.json(serializeReports(results));
+
+    res.status(201).json(serializeReport(report));
   }),
 );
 
-// ─── GET /api/reports ───────────────────────────────────────────────────────
+// ─── Reads ─────────────────────────────────────────────────────────────────
 router.get(
   '/',
-  requireAuth,
-  requireRole('ngo', 'government', 'admin'),
   [
-    query('status').optional().isIn(REPORT_STATUSES),
-    query('needType').optional().customSanitizer(normalizeNeedType).isIn(NEED_TYPES),
-    query('limit').optional().isInt({ min: 1, max: 500 }).toInt(),
+    query('status').optional().isIn(NEED_STATUSES),
+    query('needType').optional().isIn(NEED_TYPES),
+    query('limit').optional().isInt({ min: 1, max: 500 }),
   ],
   handleValidation,
   asyncHandler(async (req, res) => {
-    const reports = await listReports({
+    const reports = await listFeed({
+      role: req.user.role,
+      capabilities: req.user.capabilities || [],
       status: req.query.status,
       needType: req.query.needType,
       limit: req.query.limit,
     });
-    res.json(serializeReports(reports));
+    // Citizens never see who reported what.
+    const hideReporter = req.user.role === 'citizen';
+    res.json(reports.map((r) => serializeReport(r, { hideReporter })));
   }),
 );
 
-// ─── PATCH|POST /api/reports/:id/claim ──────────────────────────────────────
-async function handleClaim(req, res) {
-  const report = await getReportById(req.params.id);
-
-  // Only pending reports are claimable.
-  if (report.status !== 'pending') {
-    throw ApiError.conflict('Report is no longer available to claim', {
-      status: report.status,
-    });
-  }
-
-  const updated = await claimReport({ reportId: req.params.id, userId: req.user._id });
-  if (!updated) {
-    // Lost the race between the read above and the atomic update.
-    throw ApiError.conflict('Report was claimed by someone else');
-  }
-
-  res.json(serializeReport(updated));
-}
-
-router.patch(
-  '/:id/claim',
-  requireAuth,
-  requireRole('ngo'),
-  [param('id').isMongoId()],
-  handleValidation,
-  asyncHandler(handleClaim),
+router.get(
+  '/mine',
+  asyncHandler(async (req, res) => {
+    const reports = await listMine(req.user._id);
+    // A merged contributor sees the resolved primary; never expose another
+    // reporter's identity (id/phone/name) to a citizen.
+    const hideReporter = req.user.role === 'citizen';
+    res.json(reports.map((r) => serializeReport(r, { hideReporter })));
+  }),
 );
+
+// ─── Per-need actions (NGO only) ───────────────────────────────────────────
+const needParam = [param('id').isMongoId(), param('type').isIn(NEED_TYPES)];
+
 router.post(
-  '/:id/claim',
-  requireAuth,
+  '/:id/needs/:type/claim',
   requireRole('ngo'),
-  [param('id').isMongoId()],
-  handleValidation,
-  asyncHandler(handleClaim),
-);
-
-// ─── PATCH|POST /api/reports/:id/release ────────────────────────────────────
-async function handleRelease(req, res) {
-  const force = req.user.role === 'admin';
-  const updated = await releaseReport({
-    reportId: req.params.id,
-    userId: req.user._id,
-    force,
-  });
-  if (!updated) {
-    throw ApiError.conflict('Report is not currently claimed by you');
-  }
-  res.json(serializeReport(updated));
-}
-
-router.patch(
-  '/:id/release',
-  requireAuth,
-  requireRole('ngo', 'admin'),
-  [param('id').isMongoId()],
-  handleValidation,
-  asyncHandler(handleRelease),
-);
-router.post(
-  '/:id/release',
-  requireAuth,
-  requireRole('ngo', 'admin'),
-  [param('id').isMongoId()],
-  handleValidation,
-  asyncHandler(handleRelease),
-);
-
-// ─── PATCH /api/reports/:id/status ──────────────────────────────────────────
-router.patch(
-  '/:id/status',
-  requireAuth,
-  requireRole('ngo', 'government', 'admin'),
-  [param('id').isMongoId(), body('status').isIn(SETTABLE_STATUSES)],
+  needParam,
   handleValidation,
   asyncHandler(async (req, res) => {
-    const updated = await updateReportStatus({
+    const report = await claimNeed({
       reportId: req.params.id,
-      status: req.body.status,
-      userId: req.user._id,
+      needType: req.params.type,
+      actor: req.user,
     });
-    if (!updated) throw ApiError.notFound('Report not found');
-    res.json(serializeReport(updated));
+    res.json(serializeReport(report));
+  }),
+);
+
+async function setStatusHandler(req, res) {
+  const report = await updateNeedStatus({
+    reportId: req.params.id,
+    needType: req.params.type,
+    status: req.body.status,
+    actor: req.user,
+  });
+  res.json(serializeReport(report));
+}
+
+router.patch(
+  '/:id/needs/:type/status',
+  requireRole('ngo'),
+  [...needParam, body('status').isIn(NEED_STATUSES)],
+  handleValidation,
+  asyncHandler(setStatusHandler),
+);
+
+// Alias so clients that only speak POST for actions still work.
+router.post(
+  '/:id/needs/:type/status',
+  requireRole('ngo'),
+  [...needParam, body('status').isIn(NEED_STATUSES)],
+  handleValidation,
+  asyncHandler(setStatusHandler),
+);
+
+router.post(
+  '/:id/needs/:type/release',
+  requireRole('ngo'),
+  needParam,
+  handleValidation,
+  asyncHandler(async (req, res) => {
+    const report = await releaseNeed({
+      reportId: req.params.id,
+      needType: req.params.type,
+      actor: req.user,
+    });
+    res.json(serializeReport(report));
   }),
 );
 

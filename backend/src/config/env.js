@@ -12,31 +12,62 @@ function required(name, fallback) {
   return value;
 }
 
-/**
- * Parse "minLat,maxLat,minLng,maxLng" into an object.
- * Default bounds: Tamil Nadu, India (lat 7.9 to 13.7, lng 76.1 to 80.5).
- */
-function parseRegionBounds(raw) {
-  const tamilNadu = { minLat: 7.9, maxLat: 13.7, minLng: 76.1, maxLng: 80.5 };
-  if (!raw) return tamilNadu;
-  const parts = raw.split(',').map((n) => Number(n.trim()));
-  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) {
-    // eslint-disable-next-line no-console
-    console.warn(`[env] Invalid DEPLOYMENT_REGION_BOUNDS="${raw}", defaulting to Tamil Nadu.`);
-    return tamilNadu;
-  }
-  const [minLat, maxLat, minLng, maxLng] = parts;
-  return { minLat, maxLat, minLng, maxLng };
-}
-
 function parseBool(value, fallback) {
   if (value === undefined) return fallback;
   return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
 }
 
+function parseNumber(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  if (Number.isNaN(n)) {
+    // eslint-disable-next-line no-console
+    console.warn(`[env] ${name}="${raw}" is not a number, using default ${fallback}.`);
+    return fallback;
+  }
+  return n;
+}
+
 const jwtSecret = required('JWT_SECRET', 'dev-insecure-secret-change-me');
 if (isProd && jwtSecret === 'dev-insecure-secret-change-me') {
   throw new Error('JWT_SECRET must be set to a strong value in production.');
+}
+
+// ─── Identity adapter ───────────────────────────────────────────────────────
+// 'basic' (default): identityVerified stays false until a manual/external flow
+// flips it. 'digilocker': OAuth authorization code + PKCE, scaffolded.
+const identityMode = (process.env.IDENTITY_MODE || 'basic').toLowerCase();
+if (!['basic', 'digilocker'].includes(identityMode)) {
+  throw new Error(`IDENTITY_MODE must be "basic" or "digilocker", got "${identityMode}".`);
+}
+
+// DigiLocker credentials are only meaningful in digilocker mode. Env validation
+// must NOT require them in basic mode. In digilocker mode a missing credential
+// does not crash the server — the routes report 501 until they exist.
+const digilocker = {
+  clientId: process.env.DIGILOCKER_CLIENT_ID || '',
+  clientSecret: process.env.DIGILOCKER_CLIENT_SECRET || '',
+  redirectUri: process.env.DIGILOCKER_REDIRECT_URI || '',
+  authorizeUrl:
+    process.env.DIGILOCKER_AUTHORIZE_URL ||
+    'https://uidauth.digilocker.gov.in/digilocker/public/oauth2/authorize',
+  tokenUrl:
+    process.env.DIGILOCKER_TOKEN_URL ||
+    'https://uidauth.digilocker.gov.in/digilocker/public/oauth2/token',
+  profileUrl:
+    process.env.DIGILOCKER_PROFILE_URL ||
+    'https://api.digilocker.gov.in/v2/open/oauth2/user/profile',
+};
+digilocker.configured = Boolean(
+  digilocker.clientId && digilocker.clientSecret && digilocker.redirectUri,
+);
+if (identityMode === 'digilocker' && !digilocker.configured) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    '[env] IDENTITY_MODE=digilocker but DIGILOCKER_CLIENT_ID / _CLIENT_SECRET / _REDIRECT_URI '
+      + 'are incomplete — identity routes will return 501 until they are set.',
+  );
 }
 
 export const env = {
@@ -47,9 +78,23 @@ export const env = {
   jwtSecret,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '1h',
   clientOrigin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
-  staleClaimHours: Number(process.env.STALE_CLAIM_HOURS || 4),
-  smsApiKey: process.env.SMS_API_KEY || '',
-  regionBounds: parseRegionBounds(process.env.DEPLOYMENT_REGION_BOUNDS),
-  gapCellThreshold: Number(process.env.GAP_CELL_THRESHOLD || 3),
-  geocodeOnSms: parseBool(process.env.GEOCODE_ON_SMS, false),
+
+  // How long the driver waits to select a server. Raised for Atlas runs.
+  mongoServerSelectionTimeoutMS: parseNumber('MONGO_SERVER_SELECTION_TIMEOUT_MS', 10000),
+
+  // Government bootstrap (server start, only when no government user exists).
+  govEmail: process.env.GOV_EMAIL || '',
+  govPassword: process.env.GOV_PASSWORD || '',
+
+  // Sweeper / gap scanner tuning.
+  staleClaimHours: parseNumber('STALE_CLAIM_HOURS', 4),
+  staleSweepMinutes: parseNumber('STALE_SWEEP_MINUTES', 15),
+  gapThresholdMinutes: parseNumber('GAP_THRESHOLD_MINUTES', 30),
+  gapCellThreshold: parseNumber('GAP_CELL_THRESHOLD', 3),
+  gapScanMinutes: parseNumber('GAP_SCAN_MINUTES', 5),
+
+  identityMode,
+  digilocker,
+
+  bcryptRounds: parseNumber('BCRYPT_ROUNDS', 12),
 };

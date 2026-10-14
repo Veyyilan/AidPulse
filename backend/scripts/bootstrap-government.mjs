@@ -1,68 +1,70 @@
 /**
- * bootstrap-government.mjs — one-off script to create or promote a government account.
+ * bootstrap-government.mjs — manual equivalent of the server-start bootstrap.
  *
- * Usage (from backend directory):
- *   node scripts/bootstrap-government.mjs <email> <password> <name> <organizationName>
+ * Creates the single government account from GOV_EMAIL / GOV_PASSWORD (or CLI
+ * args) ONLY when no government user exists. It never overwrites an existing
+ * government account and never logs the password.
  *
- * Example:
- *   node scripts/bootstrap-government.mjs gov@tn.gov.in SecureGov123! "TN Disaster Control" "Tamil Nadu Disaster Management Authority"
+ * Usage:
+ *   node scripts/bootstrap-government.mjs
+ *   node scripts/bootstrap-government.mjs gov@tn.gov.in 'GovPass123!'
+ *   GOV_EMAIL=... GOV_PASSWORD=... node scripts/bootstrap-government.mjs
  */
-
-import { MongoClient } from 'mongodb';
 import bcrypt from 'bcryptjs';
+import { connectDb, disconnectDb } from '../src/config/db.js';
+import { User } from '../src/models/User.js';
 
-const email = process.argv[2];
-const password = process.argv[3];
-const name = process.argv[4] || 'Government Official';
-const organizationName = process.argv[5] || 'State Disaster Management Authority';
+const email = (process.argv[2] || process.env.GOV_EMAIL || '').trim().toLowerCase();
+const password = process.argv[3] || process.env.GOV_PASSWORD || '';
+const name = process.argv[4] || 'Government Control';
+const organizationName = process.argv[5] || 'State Emergency Management';
 
-if (!email || !password) {
-  console.error('Usage: node scripts/bootstrap-government.mjs <email> <password> [name] [organizationName]');
-  console.error('Example: node scripts/bootstrap-government.mjs gov@tn.gov.in GovPass123! "Control Officer" "TNDMA"');
-  process.exit(1);
-}
+async function main() {
+  if (!email || !password) {
+    console.error(
+      'Usage: node scripts/bootstrap-government.mjs [email] [password] [name] [organizationName]\n'
+        + '       (email/password may also come from GOV_EMAIL / GOV_PASSWORD)',
+    );
+    process.exit(1);
+  }
 
-const uri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/aidpulse';
-const client = new MongoClient(uri);
+  await connectDb();
 
-try {
-  await client.connect();
-  console.log('[bootstrap-government] Connected to MongoDB.');
+  const existing = await User.findOne({ role: 'government' });
+  if (existing) {
+    console.log('[bootstrap-government] A government account already exists; nothing to do.');
+    console.log(`    email : ${existing.email}`);
+    console.log(`    name  : ${existing.name}`);
+    console.log('  (Existing government accounts are never overwritten.)');
+    await disconnectDb();
+    return;
+  }
 
-  const db = client.db();
-  const users = db.collection('users');
   const passwordHash = await bcrypt.hash(password, 12);
-
-  const cleanEmail = email.trim().toLowerCase();
-
-  const result = await users.findOneAndUpdate(
-    { email: cleanEmail },
-    {
-      $set: {
-        name: name.trim(),
-        role: 'government',
-        organizationName: organizationName.trim(),
-        passwordHash,
-        isSuspended: false,
-      },
-      $setOnInsert: {
-        email: cleanEmail,
-        createdAt: new Date(),
-        phone: null,
-      },
-    },
-    { upsert: true, returnDocument: 'after' }
-  );
+  const gov = await User.create({
+    name,
+    email,
+    passwordHash,
+    role: 'government',
+    organizationName,
+    mustChangePassword: true,
+    identityVerified: false,
+  });
 
   console.log('[bootstrap-government] ✓ Government account ready:');
-  console.log(`    email        : ${result.email}`);
-  console.log(`    name         : ${result.name}`);
-  console.log(`    role         : ${result.role}`);
-  console.log(`    organization : ${result.organizationName}`);
+  console.log(`    email        : ${gov.email}`);
+  console.log(`    name         : ${gov.name}`);
+  console.log(`    organization : ${gov.organizationName}`);
+  console.log('    mustChangePassword: true');
   console.log('\nUse these credentials to sign in and register authorized NGO accounts.');
-} catch (err) {
-  console.error('[bootstrap-government] Failed:', err.message);
-  process.exit(1);
-} finally {
-  await client.close();
+
+  await disconnectDb();
 }
+
+main()
+  .then(() => process.exit(0))
+  .catch(async (err) => {
+    console.error('[bootstrap-government] failed:', err.message);
+    await disconnectDb().catch(() => {});
+    process.exit(1);
+  });

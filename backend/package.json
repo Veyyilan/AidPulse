@@ -1,7 +1,7 @@
 {
   "name": "aidpulse-backend",
   "version": "1.0.0",
-  "description": "AidPulse backend — Express + Mongoose + Socket.IO (JWT auth, atomic claiming, geospatial duplicate detection).",
+  "description": "AidPulse backend — Express + Mongoose + Socket.IO (JWT auth, atomic per-need claiming, geospatial merge detection).",
   "private": true,
   "type": "module",
   "main": "src/index.js",
@@ -12,12 +12,11 @@
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
     "mongo:dev": "node scripts/mongo-dev.mjs",
-    "check:flow": "node scripts/check-claim-race.mjs",
-    "seed": "node src/seed.js",
+    "reset:dev": "node scripts/dev-reset.mjs",
     "bootstrap:gov": "node scripts/bootstrap-government.mjs",
-    "test:smoke": "node test/smoke.mjs",
-    "test:realtime": "node test/realtime.mjs",
-    "test": "node test/smoke.mjs && node test/realtime.mjs"
+    "seed": "node scripts/demo-seed.mjs",
+    "check:flow": "node scripts/check-flow.mjs",
+    "test": "node scripts/check-flow.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

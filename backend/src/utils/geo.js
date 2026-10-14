@@ -1,4 +1,4 @@
-import { env } from '../config/env.js';
+import { REGION_BOUNDS, GAP_CELL_DEGREES } from '../config/constants.js';
 
 const EARTH_RADIUS_KM = 6371.0088;
 
@@ -13,6 +13,11 @@ export function haversineKm(lat1, lng1, lat2, lng2) {
   return 2 * EARTH_RADIUS_KM * Math.asin(Math.sqrt(a));
 }
 
+/** Haversine distance in metres. */
+export function haversineMeters(lat1, lng1, lat2, lng2) {
+  return haversineKm(lat1, lng1, lat2, lng2) * 1000;
+}
+
 /** True when a coordinate is a valid WGS84 lat/lng. */
 export function isValidLatLng(lat, lng) {
   return (
@@ -25,13 +30,29 @@ export function isValidLatLng(lat, lng) {
   );
 }
 
-/** True when a coordinate falls inside the configured deployment region. */
+/**
+ * True when a coordinate falls inside the Tamil Nadu deployment region
+ * (lat 7.9–13.7, lng 76.1–80.5).
+ */
 export function isInsideRegion(lat, lng) {
-  const b = env.regionBounds;
+  const b = REGION_BOUNDS;
   return lat >= b.minLat && lat <= b.maxLat && lng >= b.minLng && lng <= b.maxLng;
 }
 
 /** Build a GeoJSON Point from lat/lng (note GeoJSON order is [lng, lat]). */
 export function toGeoPoint(lat, lng) {
   return { type: 'Point', coordinates: [Number(lng), Number(lat)] };
+}
+
+/** Floor a coordinate to the 0.01-degree gap grid. */
+export function gapCellIndex(lat, lng) {
+  return {
+    latCell: Math.floor(lat / GAP_CELL_DEGREES),
+    lngCell: Math.floor(lng / GAP_CELL_DEGREES),
+  };
+}
+
+/** Stable string key for a gap grid cell. */
+export function gapCellKey(latCell, lngCell) {
+  return `${latCell}:${lngCell}`;
 }

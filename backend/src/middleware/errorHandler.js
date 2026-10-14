@@ -36,14 +36,14 @@ export function errorHandler(err, _req, res, _next) {
     message = `Invalid ${err.path}`;
   }
 
-  if (status >= 500) {
+  if (status >= 500 && !(err instanceof ApiError)) {
     // eslint-disable-next-line no-console
     console.error('[error]', err);
   }
 
   const body = { error: message };
   if (details) body.details = details;
-  if (!env.isProd && status >= 500) body.stack = err.stack;
+  if (!env.isProd && status >= 500 && !(err instanceof ApiError)) body.stack = err.stack;
 
   res.status(status).json(body);
 }

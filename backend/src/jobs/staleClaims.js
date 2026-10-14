@@ -1,52 +1,63 @@
-import cron from 'node-cron';
-import { Report } from '../models/Report.js';
-import { recordAudit } from '../services/auditService.js';
-import { emitToRooms } from '../realtime/index.js';
-import { serializeReport } from '../utils/serialize.js';
-import { OPERATIONAL_ROOMS } from '../config/constants.js';
 import { env } from '../config/env.js';
+import { sweepStaleClaims, reconcileMerges } from '../services/reportService.js';
+
+let timer = null;
 
 /**
- * Revert claims that have sat without any update for STALE_CLAIM_HOURS back to
- * `pending`, logging a `force_released` audit row and emitting `report:released`.
- * Each revert is itself an atomic conditional update so concurrent sweeps are safe.
+ * Sweep force-releases stale claims, then reconciles duplicate primaries that a
+ * create-time race left unmerged. Each step is independent and idempotent, so a
+ * failure in one still lets the other run on the next tick.
  */
-export async function runStaleClaimSweep() {
-  const cutoff = new Date(Date.now() - env.staleClaimHours * 3600 * 1000);
-
-  const stale = await Report.find({ status: 'claimed', claimedAt: { $lt: cutoff } }).select('_id');
-
-  let released = 0;
-  for (const { _id } of stale) {
-    const updated = await Report.findOneAndUpdate(
-      { _id, status: 'claimed', claimedAt: { $lt: cutoff } },
-      { $set: { status: 'pending' }, $unset: { claimedBy: 1, claimedAt: 1 } },
-      { new: true },
-    );
-    if (!updated) continue;
-
-    await recordAudit({ reportId: updated._id, actorId: null, action: 'force_released' });
-    emitToRooms(
-      [...OPERATIONAL_ROOMS, `user:${updated.reportedBy}`],
-      'report:released',
-      serializeReport(updated),
-    );
-    released += 1;
-  }
-
-  if (released > 0) {
+async function runSweepAndReconcile() {
+  try {
+    const released = await sweepStaleClaims();
+    if (released.length) {
+      // eslint-disable-next-line no-console
+      console.log(`[sweeper] force-released ${released.length} stale need(s)`);
+    }
+  } catch (err) {
     // eslint-disable-next-line no-console
-    console.log(`[stale-claims] force-released ${released} stale claim(s)`);
+    console.warn('[sweeper] sweep failed:', err.message);
   }
-  return released;
+
+  try {
+    const merges = await reconcileMerges();
+    if (merges.length) {
+      // eslint-disable-next-line no-console
+      console.log(`[sweeper] reconciled ${merges.length} duplicate primary report(s)`);
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[sweeper] reconcile failed:', err.message);
+  }
 }
 
-/** Schedule the sweeper every 15 minutes. */
+/**
+ * Start the stale-claim sweeper. Runs every STALE_SWEEP_MINUTES (default 15),
+ * force-releases needs with no update for more than STALE_CLAIM_HOURS
+ * (default 4), and reconciles duplicate primaries. Every write is conditional,
+ * so repeated runs are harmless.
+ */
 export function startStaleClaimJob() {
-  cron.schedule('*/15 * * * *', () => {
-    runStaleClaimSweep().catch((err) => {
+  if (timer) clearInterval(timer);
+  const intervalMs = Math.max(1000, env.staleSweepMinutes * 60 * 1000);
+
+  timer = setInterval(() => {
+    runSweepAndReconcile().catch((err) => {
       // eslint-disable-next-line no-console
-      console.error('[stale-claims] sweep failed:', err.message);
+      console.warn('[sweeper] failed:', err.message);
     });
-  });
+  }, intervalMs);
+  timer.unref?.();
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `[sweeper] every ${env.staleSweepMinutes} min (releases claims idle > ${env.staleClaimHours} h, reconciles merges)`,
+  );
+  return timer;
+}
+
+export function stopStaleClaimJob() {
+  if (timer) clearInterval(timer);
+  timer = null;
 }

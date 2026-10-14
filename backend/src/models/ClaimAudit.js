@@ -1,15 +1,17 @@
 import mongoose from 'mongoose';
-import { AUDIT_ACTIONS } from '../config/constants.js';
+import { AUDIT_ACTIONS, NEED_TYPES } from '../config/constants.js';
 
 const { Schema } = mongoose;
 
 /**
  * Append-only claim audit log. There is no route that updates or deletes these
  * documents, and the model hooks below reject any mutation attempt outright.
+ * Callers MUST await the insert BEFORE emitting any socket event.
  */
 const claimAuditSchema = new Schema(
   {
     reportId: { type: Schema.Types.ObjectId, ref: 'Report', required: true, index: true },
+    needType: { type: String, enum: NEED_TYPES, required: true },
     actorId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
     action: { type: String, enum: AUDIT_ACTIONS, required: true },
     timestamp: { type: Date, default: Date.now, immutable: true },

@@ -1,18 +1,17 @@
+import { User } from '../models/User.js';
 import { Report } from '../models/Report.js';
+import { ClaimAudit } from '../models/ClaimAudit.js';
 
 /**
- * Reconcile the `reports` indexes with the current schema on startup.
+ * Reconcile indexes for every model on startup.
  *
- * The first schema version declared a *global* unique index on `clientId`
- * (named `clientId_1`). Idempotency is now scoped per reporting user via the
- * compound `{ reportedBy, clientId }` index, so the legacy global index must be
- * dropped — otherwise MongoDB would keep rejecting a *different* user reusing
- * the same clientId, breaking per-user idempotency.
- *
- * `createIndexes()` (not `syncIndexes()`) is used so we never silently drop an
- * unrelated index in a production database.
+ * `createIndexes()` (not `syncIndexes()`) is used on the live path so we never
+ * silently drop an unrelated index in a production database. The dev-only
+ * `scripts/dev-reset.mjs` uses `syncIndexes()` for a true clean slate.
  */
 export async function syncReportIndexes() {
+  // The legacy schema declared a global unique index on clientId. Idempotency
+  // is scoped per reporting user now, so drop the old index if present.
   try {
     const existing = await Report.collection.indexes();
     if (existing.some((ix) => ix.name === 'clientId_1')) {
@@ -28,5 +27,5 @@ export async function syncReportIndexes() {
     }
   }
 
-  await Report.createIndexes();
+  await Promise.all([User.createIndexes(), Report.createIndexes(), ClaimAudit.createIndexes()]);
 }
