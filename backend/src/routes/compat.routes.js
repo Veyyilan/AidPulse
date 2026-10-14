@@ -21,11 +21,11 @@ router.get('/health', (_req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-// GET /api/users  (admin) — users plus their report counts
+// GET /api/users  (admin, government) — users plus their report counts
 router.get(
   '/users',
   requireAuth,
-  requireRole('admin'),
+  requireRole('admin', 'government'),
   asyncHandler(async (_req, res) => {
     const users = await User.find().select('-passwordHash').sort({ createdAt: -1 });
     const counts = await Report.aggregate([
@@ -39,6 +39,42 @@ router.get(
         reports: countMap.get(String(u._id)) || 0,
       })),
     );
+  }),
+);
+
+// POST /api/users/register-ngo (government, admin)
+router.post(
+  '/users/register-ngo',
+  requireAuth,
+  requireRole('government', 'admin'),
+  asyncHandler(async (req, res) => {
+    const { name, email, password, organizationName, phone } = req.body;
+    if (!name || !email || !password || !organizationName) {
+      throw ApiError.badRequest('Name, email, password, and organization name are required');
+    }
+    if (password.length < 6) {
+      throw ApiError.badRequest('Password must be at least 6 characters');
+    }
+
+    const existing = await User.findOne({ email: email.toLowerCase().trim() });
+    if (existing) {
+      throw ApiError.conflict('An account with this email already exists');
+    }
+
+    const bcryptModule = await import('bcryptjs');
+    const passwordHash = await bcryptModule.default.hash(password, 12);
+
+    const ngoUser = await User.create({
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
+      passwordHash,
+      role: 'ngo',
+      organizationName: organizationName.trim(),
+      phone: phone?.trim() || null,
+      isSuspended: false,
+    });
+
+    res.status(201).json(serializeUser(ngoUser));
   }),
 );
 

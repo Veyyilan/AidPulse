@@ -1,32 +1,35 @@
-﻿import axios from 'axios'
+import axios from 'axios'
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:4000/api',
-  timeout: 10000,
+  timeout: 12000,
   headers: { 'Content-Type': 'application/json' },
 })
 
-// Attach JWT from localStorage on every request
+// Attach JWT on every request
 api.interceptors.request.use((config) => {
-  const stored = localStorage.getItem('aidpulse_user')
-  if (stored) {
-    try {
-      const user = JSON.parse(stored)
-      if (user?.token) config.headers.Authorization = `Bearer ${user.token}`
-    } catch (_) {}
-  }
+  try {
+    const stored = localStorage.getItem('aidpulse_user')
+    if (stored) {
+      const u = JSON.parse(stored)
+      if (u?.token) config.headers.Authorization = `Bearer ${u.token}`
+    }
+  } catch {}
   return config
 })
 
-// 401 interceptor: clear session, notify socket to disconnect, redirect to login
+// 401: clear session, disconnect socket, clear queue, redirect
 api.interceptors.response.use(
   (res) => res,
   (err) => {
     if (err.response?.status === 401) {
       localStorage.removeItem('aidpulse_user')
-      // Notify socket context to disconnect
+      localStorage.removeItem('aidpulse_submission_queue')
+      sessionStorage.clear()
       window.dispatchEvent(new CustomEvent('aidpulse:auth-expired'))
-      window.location.href = '/login'
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
     }
     return Promise.reject(err)
   }

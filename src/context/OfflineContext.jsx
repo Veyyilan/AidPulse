@@ -1,12 +1,20 @@
-﻿import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
 
 const OfflineContext = createContext(null)
 
+const QUEUE_KEY = 'aidpulse_submission_queue'
+
+function loadQueue() {
+  try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]') }
+  catch { return [] }
+}
+function saveQueue(q) {
+  localStorage.setItem(QUEUE_KEY, JSON.stringify(q))
+}
+
 export function OfflineProvider({ children }) {
   const [isOnline, setIsOnline] = useState(navigator.onLine)
-  const [queue, setQueue] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('aidpulse_submission_queue') || '[]') } catch { return [] }
-  })
+  const [queue, setQueue]       = useState(loadQueue)
 
   useEffect(() => {
     const on  = () => setIsOnline(true)
@@ -16,42 +24,37 @@ export function OfflineProvider({ children }) {
     return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off) }
   }, [])
 
-  // Clear queue when auth expires (user logs out or token invalid)
+  // Clear on logout / auth expiry
   useEffect(() => {
     const handler = () => {
       setQueue([])
-      localStorage.removeItem('aidpulse_submission_queue')
+      localStorage.removeItem(QUEUE_KEY)
     }
     window.addEventListener('aidpulse:auth-expired', handler)
     return () => window.removeEventListener('aidpulse:auth-expired', handler)
   }, [])
 
-  const saveQueue = useCallback((q) => {
-    setQueue(q)
-    localStorage.setItem('aidpulse_submission_queue', JSON.stringify(q))
-  }, [])
-
-  const enqueue = useCallback((submission) => {
-    const clientId = crypto.randomUUID()
+  const enqueue = useCallback((item) => {
     setQueue(prev => {
-      const next = [...prev, { ...submission, id: Date.now(), clientId, queuedAt: new Date().toISOString() }]
-      localStorage.setItem('aidpulse_submission_queue', JSON.stringify(next))
+      const next = [...prev, { ...item, id: crypto.randomUUID(), queuedAt: new Date().toISOString() }]
+      saveQueue(next)
       return next
     })
   }, [])
 
   const dequeue = useCallback((id) => {
     setQueue(prev => {
-      const next = prev.filter(item => item.id !== id)
-      localStorage.setItem('aidpulse_submission_queue', JSON.stringify(next))
+      const next = prev.filter(i => i.id !== id)
+      saveQueue(next)
       return next
     })
   }, [])
 
-  // Auto-retry when coming back online
+  // Attempt flush when coming back online
   useEffect(() => {
-    if (!isOnline || queue.length === 0) return
-    window.dispatchEvent(new CustomEvent('aidpulse:retry-queue', { detail: queue }))
+    if (isOnline && queue.length > 0) {
+      window.dispatchEvent(new CustomEvent('aidpulse:retry-queue', { detail: queue }))
+    }
   }, [isOnline, queue])
 
   return (

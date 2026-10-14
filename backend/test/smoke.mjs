@@ -75,14 +75,35 @@ async function main() {
   await import('../src/index.js');
   await waitForServer();
 
-  // Create an admin directly in the DB (admins cannot self-register by design).
+  // Create test users directly in the DB (registration is citizen-only; NGOs/Gov are provisioned).
   const bcrypt = (await import('bcryptjs')).default;
   const { User } = await import('../src/models/User.js');
+  const passwordHash = await bcrypt.hash('Password123!', 12);
+
   await User.create({
     name: 'Smoke Admin',
     email: 'admin@test.io',
     role: 'admin',
-    passwordHash: await bcrypt.hash('Password123!', 12),
+    passwordHash,
+  });
+  await User.create({
+    name: 'NGO One',
+    email: 'ngo1@test.io',
+    role: 'ngo',
+    organizationName: 'Red Cross',
+    passwordHash,
+  });
+  await User.create({
+    name: 'NGO Two',
+    email: 'ngo2@test.io',
+    role: 'ngo',
+    passwordHash,
+  });
+  await User.create({
+    name: 'Gov User',
+    email: 'gov@test.io',
+    role: 'government',
+    passwordHash,
   });
 
   // ── Health ────────────────────────────────────────────────────────────────
@@ -100,23 +121,11 @@ async function main() {
   const citizenToken = citizenReg.body.token;
 
   const adminReg = await api('POST', '/auth/register', {
-    body: { name: 'Test Admin', email: 'admin@test.io', password: 'Password123!', role: 'admin' },
+    body: { name: 'Test Admin', email: 'admin2@test.io', password: 'Password123!', role: 'admin' },
   });
-  check('admin role cannot be self-assigned', adminReg.status === 403, adminReg.body);
+  check('admin role ignored, creates citizen', adminReg.status === 201 && adminReg.body.role === 'citizen', adminReg.body);
 
-  // Create an admin directly via a second registration with allowed role, then
-  // promote through the DB is out of scope — instead register a gov user and
-  // verify role plumbing using the admin seeded below.
-  await api('POST', '/auth/register', {
-    body: { name: 'NGO One', email: 'ngo1@test.io', password: 'Password123!', role: 'ngo', organizationName: 'Red Cross' },
-  });
-  await api('POST', '/auth/register', {
-    body: { name: 'NGO Two', email: 'ngo2@test.io', password: 'Password123!', role: 'ngo' },
-  });
-  await api('POST', '/auth/register', {
-    body: { name: 'Gov User', email: 'gov@test.io', password: 'Password123!', role: 'government' },
-  });
-
+  // Login with pre-created users
   const login = await api('POST', '/auth/login', {
     body: { email: 'ngo1@test.io', password: 'Password123!' },
   });
@@ -252,8 +261,8 @@ async function main() {
 
   // ── Users + suspend ─────────────────────────────────────────────────────────
   console.log('\nadmin users');
-  const usersListDenied = await api('GET', '/users', { token: govToken });
-  check('non-admin cannot list users -> 403', usersListDenied.status === 403);
+  const usersListDenied = await api('GET', '/users', { token: citizenToken });
+  check('citizen cannot list users -> 403', usersListDenied.status === 403);
 
   const usersList = await api('GET', '/users', { token: adminToken });
   check('admin lists users with report counts', usersList.status === 200 && usersList.body.every((u) => typeof u.reports === 'number'), usersList.body?.length);

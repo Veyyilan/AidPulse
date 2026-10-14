@@ -13,8 +13,9 @@ import { authLimiter } from '../middleware/rateLimit.js';
 const router = Router();
 
 const BCRYPT_ROUNDS = 12;
-// Roles a user may self-select at registration. `admin` can NEVER be set here.
-const SELF_SERVICE_ROLES = ['citizen', 'ngo', 'government'];
+// Roles a user may self-select at registration.
+// Citizens self-register publicly; NGOs are provisioned by Government.
+const SELF_SERVICE_ROLES = ['citizen'];
 
 router.post(
   '/register',
@@ -35,20 +36,8 @@ router.post(
   asyncHandler(async (req, res) => {
     const { name, email, password, phone, organizationName } = req.body;
 
-    // Sanitise the requested role: never trust privilege from input.
-    let role = 'citizen';
-    if (req.body.role !== undefined && req.body.role !== null && req.body.role !== '') {
-      const requested = String(req.body.role).toLowerCase();
-      if (requested === 'admin') {
-        throw ApiError.forbidden('admin role cannot be self-assigned');
-      }
-      if (!SELF_SERVICE_ROLES.includes(requested)) {
-        throw ApiError.unprocessable('Invalid role', [
-          { field: 'role', message: `role must be one of: ${SELF_SERVICE_ROLES.join(', ')}` },
-        ]);
-      }
-      role = requested;
-    }
+    // Registration is citizen-only. Any role in the request body is strictly ignored.
+    const role = 'citizen';
 
     const existing = await User.findOne({ email });
     if (existing) throw ApiError.conflict('Email already registered');

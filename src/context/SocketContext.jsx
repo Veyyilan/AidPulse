@@ -1,96 +1,80 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react'
+import React, { createContext, useContext, useRef, useState, useEffect, useCallback } from 'react'
 import { useAuth } from './AuthContext'
 
 const SocketContext = createContext(null)
 
-const INITIAL_STATE = {
-  reports: [],
-  gaps: [],
-  connected: false,
-}
-
 export function SocketProvider({ children }) {
   const { user } = useAuth()
   const socketRef = useRef(null)
-  const [state, setState] = useState(INITIAL_STATE)
   const [connected, setConnected] = useState(false)
+  // Accumulate real-time report updates keyed by id
+  const [liveUpdates, setLiveUpdates] = useState({})
+  const [gaps, setGaps] = useState([])
 
-  const updateReport = useCallback((updatedReport) => {
-    setState(prev => ({
-      ...prev,
-      reports: prev.reports.some(r => r.id === updatedReport.id)
-        ? prev.reports.map(r => r.id === updatedReport.id ? { ...r, ...updatedReport } : r)
-        : [updatedReport, ...prev.reports],
-    }))
+  const applyUpdate = useCallback((report) => {
+    setLiveUpdates(prev => ({ ...prev, [report.id]: report }))
   }, [])
 
   useEffect(() => {
     if (!user) {
-      // Disconnect if no user
       socketRef.current?.disconnect()
       socketRef.current = null
       setConnected(false)
+      setLiveUpdates({})
+      setGaps([])
       return
     }
 
     let socket
+    let mounted = true
+
     import('socket.io-client').then(({ io }) => {
-      // Strip any /api path suffix — socket.io must connect to the origin only.
-      // VITE_API_URL ends in /api (used by axios); passing that to io() would
-      // make socket.io treat "/api" as a namespace, silently breaking realtime.
-      const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:4000/api'
+      if (!mounted) return
+      const apiBase   = import.meta.env.VITE_API_URL || 'http://localhost:4000/api'
       const socketUrl = apiBase.replace(/\/api\/?$/, '')
+
       socket = io(socketUrl, {
         auth: { token: user.token },
         transports: ['websocket'],
-        reconnectionAttempts: 5,
+        reconnectionAttempts: 6,
         timeout: 8000,
       })
 
-      socket.on('connect', () => setConnected(true))
+      socket.on('connect',    () => setConnected(true))
       socket.on('disconnect', () => setConnected(false))
 
-      socket.on('report:new',           updateReport)
-      socket.on('report:claimed',       updateReport)
-      socket.on('report:status_updated',updateReport)
-      socket.on('report:released',      updateReport)
+      socket.on('report:new',            applyUpdate)
+      socket.on('report:claimed',        applyUpdate)
+      socket.on('report:status_updated', applyUpdate)
+      socket.on('report:released',       applyUpdate)
       socket.on('gap:alert', (gap) => {
-        setState(prev => ({ ...prev, gaps: [gap, ...prev.gaps].slice(0, 20) }))
+        setGaps(prev => [gap, ...prev].slice(0, 20))
       })
 
       socketRef.current = socket
     }).catch(() => {})
 
-    // Listen for auth expiration (401) to force reconnect with new token
-    const handleAuthExpired = () => {
+    const onExpired = () => {
       socketRef.current?.disconnect()
       socketRef.current = null
+      setConnected(false)
     }
-    window.addEventListener('aidpulse:auth-expired', handleAuthExpired)
+    window.addEventListener('aidpulse:auth-expired', onExpired)
 
     return () => {
+      mounted = false
       socket?.disconnect()
       socketRef.current = null
-      window.removeEventListener('aidpulse:auth-expired', handleAuthExpired)
+      window.removeEventListener('aidpulse:auth-expired', onExpired)
     }
-  }, [user, updateReport])
-
-  // Reconnect when token changes (e.g., after refresh)
-  useEffect(() => {
-    if (!user) return
-    if (socketRef.current?.connected && socketRef.current.io.opts.auth.token !== user.token) {
-      socketRef.current.disconnect()
-      socketRef.current = null
-      // The main effect above will recreate with new token
-    }
-  }, [user?.token])
+  }, [user, applyUpdate])
 
   const emit = useCallback((event, data) => {
     socketRef.current?.emit(event, data)
   }, [])
 
   return (
-    <SocketContext.Provider value={{ ...state, connected, emit, updateReport }}>
+    <SocketContext.Provider value={{ connected, liveUpdates, gaps, applyUpdate, emit }}>
       {children}
     </SocketContext.Provider>
   )

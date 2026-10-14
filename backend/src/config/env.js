@@ -14,16 +14,16 @@ function required(name, fallback) {
 
 /**
  * Parse "minLat,maxLat,minLng,maxLng" into an object.
- * Falls back to the whole world when unset/invalid.
+ * Default bounds: Tamil Nadu, India (lat 7.9 to 13.7, lng 76.1 to 80.5).
  */
 function parseRegionBounds(raw) {
-  const world = { minLat: -90, maxLat: 90, minLng: -180, maxLng: 180 };
-  if (!raw) return world;
+  const tamilNadu = { minLat: 7.9, maxLat: 13.7, minLng: 76.1, maxLng: 80.5 };
+  if (!raw) return tamilNadu;
   const parts = raw.split(',').map((n) => Number(n.trim()));
   if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) {
     // eslint-disable-next-line no-console
-    console.warn(`[env] Invalid DEPLOYMENT_REGION_BOUNDS="${raw}", using whole world.`);
-    return world;
+    console.warn(`[env] Invalid DEPLOYMENT_REGION_BOUNDS="${raw}", defaulting to Tamil Nadu.`);
+    return tamilNadu;
   }
   const [minLat, maxLat, minLng, maxLng] = parts;
   return { minLat, maxLat, minLng, maxLng };

@@ -63,10 +63,10 @@ router.post(
         { field: 'lat/lng', message: 'Coordinates out of range' },
       ]);
     }
-    // Reject coordinates outside the configured deployment region.
+    // Reject coordinates outside Tamil Nadu (or configured deployment region).
     if (!isInsideRegion(lat, lng)) {
-      throw ApiError.unprocessable('Location outside the supported region', [
-        { field: 'lat/lng', message: 'Report is outside the deployment region' },
+      throw ApiError.unprocessable('Location outside Tamil Nadu deployment region (lat 7.9–13.7, lng 76.1–80.5)', [
+        { field: 'lat/lng', message: 'Report location must be within Tamil Nadu (lat 7.9–13.7, lng 76.1–80.5)' },
       ]);
     }
 

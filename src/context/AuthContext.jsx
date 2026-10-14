@@ -1,42 +1,42 @@
-﻿import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
 
 const AuthContext = createContext(null)
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null)
+  const [user, setUser]     = useState(null)
   const [loading, setLoading] = useState(true)
 
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:4000/api'
 
-  // Fetch current user from server (source of truth for role)
+  // Fetch current user from server — source of truth for role
   const fetchMe = useCallback(async (token) => {
     const res = await fetch(`${apiUrl}/auth/me`, {
       headers: { Authorization: `Bearer ${token}` },
     })
-    if (!res.ok) throw new Error('Failed to fetch user')
+    if (!res.ok) throw new Error('Session invalid')
     return res.json()
   }, [apiUrl])
 
-  // Initialize from localStorage, but verify with server
+  // On mount: restore from localStorage if token is still valid
   useEffect(() => {
     const stored = localStorage.getItem('aidpulse_user')
     if (stored) {
       try {
         const parsed = JSON.parse(stored)
-        if (parsed.token) {
+        if (parsed?.token) {
           fetchMe(parsed.token)
             .then((serverUser) => {
-              // Server response is authoritative for role; keep the token.
               setUser({ ...serverUser, token: serverUser.token || parsed.token })
             })
             .catch(() => {
               localStorage.removeItem('aidpulse_user')
+              localStorage.removeItem('aidpulse_submission_queue')
               setUser(null)
             })
             .finally(() => setLoading(false))
           return
         }
-      } catch (_) {}
+      } catch {}
     }
     setLoading(false)
   }, [fetchMe])
@@ -49,10 +49,9 @@ export function AuthProvider({ children }) {
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
-      throw new Error(err.error || 'Invalid credentials')
+      throw new Error(err.error || err.message || 'Invalid credentials')
     }
     const { token } = await res.json()
-    // Fetch authoritative user data from server (includes correct role)
     const me = await fetchMe(token)
     const fullUser = { ...me, token }
     setUser(fullUser)
@@ -60,18 +59,20 @@ export function AuthProvider({ children }) {
     return fullUser
   }, [apiUrl, fetchMe])
 
-  const register = useCallback(async (name, email, password, role) => {
+  // phone is already formatted as +91XXXXXXXXXX by the form
+  const register = useCallback(async (name, email, phone, password) => {
+    const body = { name, email, password, role: 'citizen' }
+    if (phone) body.phone = phone
     const res = await fetch(`${apiUrl}/auth/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email, password, role }),
+      body: JSON.stringify(body),
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
-      throw new Error(err.error || 'Registration failed')
+      throw new Error(err.error || err.message || 'Registration failed')
     }
     const { token } = await res.json()
-    // Fetch authoritative user data from server
     const me = await fetchMe(token)
     const fullUser = { ...me, token }
     setUser(fullUser)
@@ -82,7 +83,8 @@ export function AuthProvider({ children }) {
   const logout = useCallback(() => {
     setUser(null)
     localStorage.removeItem('aidpulse_user')
-    // Notify socket + offline queue to clean up
+    localStorage.removeItem('aidpulse_submission_queue')
+    sessionStorage.clear()
     window.dispatchEvent(new CustomEvent('aidpulse:auth-expired'))
   }, [])
 

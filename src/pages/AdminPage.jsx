@@ -1,6 +1,6 @@
-﻿import React, { useState, useEffect } from "react"
-import AidMap from "../components/AidMap"
-import { StatusLabel, NeedTypeBadge } from "../components/StatusIndicators"
+import React, { useState, useEffect } from "react"
+import AidMap, { DEFAULT_TN_CENTER } from "../components/AidMap"
+import { StatusLabel } from "../components/StatusIndicators"
 import Toast from "../components/Toast"
 import { useReports } from "../hooks/useReports"
 import { useAuth } from "../context/AuthContext"
@@ -16,14 +16,24 @@ export default function AdminPage() {
 
   useEffect(() => {
     let cancelled = false
-    statsApi.clusters().then(res => { if (!cancelled) setClusters(res.data) }).catch(console.error)
-    usersApi.list().then(res => { if (!cancelled) setUsers(res.data) }).catch(console.error)
+    statsApi.clusters().then(res => {
+      if (!cancelled) setClusters(Array.isArray(res.data) ? res.data : [])
+    }).catch(() => {
+      if (!cancelled) setClusters([])
+    })
+
+    usersApi.list().then(res => {
+      if (!cancelled) setUsers(Array.isArray(res.data) ? res.data : [])
+    }).catch(() => {
+      if (!cancelled) setUsers([])
+    })
+
     return () => { cancelled = true }
   }, [])
 
   const handleForceRelease = async (clId) => {
     try {
-      await statsApi.gaps() // This triggers the force release on backend
+      await statsApi.gaps()
       setClusters(prev => prev.map(c => c.id === clId ? { ...c, staleClaims: 0 } : c))
       setToast("Stale claims released.")
     } catch {
@@ -59,39 +69,33 @@ export default function AdminPage() {
   ]
 
   return (
-    <div style={{ padding: "clamp(1.5rem, 4vw, 2.5rem) 1.5rem" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "calc(100dvh - 52px)" }}>
       {toast && <Toast message={toast} onDone={() => setToast(null)} />}
 
-      <div style={{ display: "flex", marginBottom: "2rem", borderBottom: "var(--rule)", flexWrap: "wrap" }}>
-        {tabs.map(tab => (
+      <div style={{ display: "flex", borderBottom: "var(--rule)", padding: "0 1.5rem" }}>
+        {tabs.map((t) => (
           <button
-            key={tab.id}
-            id={"admin-tab-" + tab.id}
+            key={t.id}
+            id={"tab-" + t.id}
             type="button"
-            onClick={() => setView(tab.id)}
+            className="btn-text"
+            onClick={() => setView(t.id)}
             style={{
-              background: "none", border: "none",
-              borderBottom: view === tab.id ? "2px solid var(--ink)" : "2px solid transparent",
-              color: "var(--ink)",
-              fontFamily: "var(--font-sans)",
+              padding: "0.875rem 1rem",
+              borderBottom: view === t.id ? "2px solid var(--ink)" : "2px solid transparent",
+              fontWeight: view === t.id ? 500 : 400,
               fontSize: "0.875rem",
-              fontWeight: view === tab.id ? 500 : 300,
-              padding: "0.5rem 0",
-              marginRight: "2rem",
-              cursor: "pointer",
-              marginBottom: "-1px",
-              transition: "border-color 0.15s",
             }}
           >
-            {tab.label}
+            {t.label}
           </button>
         ))}
       </div>
 
-      <div className="fade-in" key={view}>
+      <div style={{ flex: 1, overflowY: "auto", padding: "1.5rem" }}>
         {view === "clusters" && (
           <>
-            <h3 style={{ marginBottom: "1.25rem" }}>Duplicate clusters</h3>
+            <h3 style={{ marginBottom: "1.25rem" }}>Duplicate request clusters</h3>
             <ClustersTable clusters={clusters} onForceRelease={handleForceRelease} />
           </>
         )}
@@ -110,7 +114,7 @@ export default function AdminPage() {
 
         {view === "map" && (
           <div style={{ height: "calc(100dvh - 240px)", border: "var(--rule)" }}>
-            <AidMap reports={reports} height="100%" readOnly />
+            <AidMap reports={reports} center={DEFAULT_TN_CENTER} zoom={7} height="100%" readOnly />
           </div>
         )}
 
@@ -126,6 +130,10 @@ export default function AdminPage() {
 }
 
 function CoverageHeatmap({ clusters }) {
+  if (clusters.length === 0) {
+    return <p style={{ opacity: 0.45, fontSize: "0.875rem" }}>No coverage gaps detected.</p>
+  }
+
   const max = Math.max(...clusters.map(c => c.count), 1)
   return (
     <div>
@@ -146,7 +154,7 @@ function CoverageHeatmap({ clusters }) {
                 overflow: "hidden",
                 flexShrink: 0,
               }}
-              title={c.count + " reports · " + c.needTypes.join(", ")}
+              title={c.count + " reports · " + (c.needTypes || []).join(", ")}
             >
               <div style={{
                 position: "absolute", inset: 0,
@@ -157,7 +165,7 @@ function CoverageHeatmap({ clusters }) {
                 <p style={{ fontFamily: "var(--font-mono)", fontSize: "0.6rem", lineHeight: 1.3, opacity: 0.8 }}>
                   {c.count}
                   <br />
-                  {c.needTypes[0]?.slice(0,3).toUpperCase()}
+                  {c.needTypes?.[0]?.slice(0,3).toUpperCase()}
                   {c.staleClaims > 0 && (
                     <span style={{ display: "block", fontSize: "0.55rem", opacity: 0.7 }}>
                       {c.staleClaims} stale
@@ -183,6 +191,14 @@ function ClustersTable({ clusters, onForceRelease }) {
     onForceRelease(clId)
   }
 
+  if (clusters.length === 0) {
+    return (
+      <div style={{ padding: "2rem 0", opacity: 0.5 }}>
+        <p style={{ fontSize: "0.875rem", margin: 0 }}>No report clusters found.</p>
+      </div>
+    )
+  }
+
   return (
     <div style={{ overflowX: "auto" }}>
       <table className="data-table">
@@ -203,7 +219,7 @@ function ClustersTable({ clusters, onForceRelease }) {
               <td style={{ fontFamily: "var(--font-serif)", fontSize: "1.1rem" }}>{c.count}</td>
               <td>
                 <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
-                  {c.needTypes.map(t => (
+                  {(c.needTypes || []).map(t => (
                     <span key={t} style={{ fontFamily: "var(--font-mono)", fontSize: "0.65rem", letterSpacing: "0.06em" }}>
                       {t.toUpperCase()}
                     </span>
@@ -239,6 +255,14 @@ function ClustersTable({ clusters, onForceRelease }) {
 }
 
 function UsersTable({ users, onSuspend, onRestore }) {
+  if (users.length === 0) {
+    return (
+      <div style={{ padding: "2rem 0", opacity: 0.5 }}>
+        <p style={{ fontSize: "0.875rem", margin: 0 }}>No users found.</p>
+      </div>
+    )
+  }
+
   return (
     <div style={{ overflowX: "auto" }}>
       <table className="data-table">
@@ -259,12 +283,12 @@ function UsersTable({ users, onSuspend, onRestore }) {
               <td><code className="mono" style={{ fontSize: "0.7rem" }}>{u.email}</code></td>
               <td>
                 <span style={{ fontFamily: "var(--font-mono)", fontSize: "0.65rem", letterSpacing: "0.06em" }}>
-                  {u.role.toUpperCase()}
+                  {u.role?.toUpperCase()}
                 </span>
               </td>
-              <td style={{ fontFamily: "var(--font-serif)", fontSize: "1.1rem" }}>{u.reports}</td>
+              <td style={{ fontFamily: "var(--font-serif)", fontSize: "1.1rem" }}>{u.reports || 0}</td>
               <td>
-                <StatusLabel status={u.status === "suspended" ? "claimed" : "pending"} />
+                <StatusLabel status={u.status === "suspended" ? "claimed" : "resolved"} />
               </td>
               <td>
                 {u.status === "active" ? (

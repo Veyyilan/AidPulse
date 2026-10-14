@@ -98,8 +98,12 @@ async function main() {
   const citizen = await api('POST', '/auth/register', {
     body: { name: 'RT Citizen', email: 'rt.citizen@test.io', password: 'Password123!', role: 'citizen' },
   });
-  const ngo = await api('POST', '/auth/register', {
-    body: { name: 'RT NGO', email: 'rt.ngo@test.io', password: 'Password123!', role: 'ngo' },
+  // Registration is citizen-only; create NGO directly in DB
+  await User.create({
+    name: 'RT NGO',
+    email: 'rt.ngo@test.io',
+    role: 'ngo',
+    passwordHash: await bcrypt.hash('Password123!', 12),
   });
   await User.create({
     name: 'RT Admin',
@@ -107,10 +111,11 @@ async function main() {
     role: 'admin',
     passwordHash: await bcrypt.hash('Password123!', 12),
   });
+  const ngoLogin = await api('POST', '/auth/login', { body: { email: 'rt.ngo@test.io', password: 'Password123!' } });
   const admin = await api('POST', '/auth/login', { body: { email: 'rt.admin@test.io', password: 'Password123!' } });
 
   const citizenToken = citizen.body.token;
-  const ngoToken = ngo.body.token;
+  const ngoToken = ngoLogin.body.token;
 
   // ── Socket handshake auth ───────────────────────────────────────────────────
   console.log('\nsocket auth');
@@ -163,7 +168,7 @@ async function main() {
     description: 'Someone trapped, claim left idle beyond the threshold.',
     location: { type: 'Point', coordinates: [3.39, 6.46] },
     status: 'claimed',
-    claimedBy: ngo.body.id,
+    claimedBy: ngoLogin.body.id,
     claimedAt: new Date(Date.now() - 6 * 3600 * 1000), // 6h ago (> 4h threshold)
   });
 

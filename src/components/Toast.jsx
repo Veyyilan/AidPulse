@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 
-export default function Toast({ message, duration = 3000, onDone }) {
+export default function Toast({ message, duration = 4000, onDone }) {
   const [visible, setVisible] = useState(true)
 
   useEffect(() => {
@@ -9,5 +9,9 @@ export default function Toast({ message, duration = 3000, onDone }) {
   }, [duration, onDone])
 
   if (!visible) return null
-  return <div className="toast">{message}</div>
+  return (
+    <div className="toast" role="status" aria-live="polite">
+      {message}
+    </div>
+  )
 }
