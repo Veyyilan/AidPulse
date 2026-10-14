@@ -1,5 +1,5 @@
 /**
- * Live-backend verification for Steps 2–3. Run against a running API.
+ * Live-backend verification for Steps 2–5. Run against a running API.
  *
  * Exercises the documented manual flow end-to-end using the seeded demo
  * accounts:
@@ -16,6 +16,13 @@
  *       clientId gets a brand-new report and never the first user's data
  *     - `water` works end to end (label, raw value, lowercase filter)
  *     - `/auth/me` reports the role from the database, not from the token
+ *   Step 5 — end-to-end behavioural tests:
+ *     - offline idempotency: simulated offline/online retry with same clientId
+ *       yields exactly one report
+ *     - role tamper: locally stored role edited to 'ngo', request to NGO-only
+ *       endpoint must be rejected with 403
+ *     - realtime: citizen submits report -> NGO + government sockets receive
+ *       report:new without refresh
  *
  * Usage:  node scripts/check-claim-race.mjs
  * Env:    BASE_URL   (default http://localhost:4000/api)
@@ -97,8 +104,23 @@ function reportBody(overrides = {}) {
   };
 }
 
+async function connectSocket(token) {
+  const { io } = await import('socket.io-client');
+  const apiUrl = BASE.replace('/api', '');
+  return new Promise((resolve, reject) => {
+    const socket = io(apiUrl, {
+      auth: { token },
+      transports: ['websocket'],
+      reconnectionAttempts: 2,
+      timeout: 5000,
+    });
+    socket.on('connect', () => resolve(socket));
+    socket.on('connect_error', (err) => reject(err));
+  });
+}
+
 async function main() {
-  console.log(`[step3] target ${BASE}`);
+  console.log(`[step5] target ${BASE}`);
   await waitForServer();
 
   console.log('\nstep 1 — log in with the seeded accounts');
@@ -294,11 +316,137 @@ async function main() {
   );
   check('the token itself still claims citizen (proves the source)', decodeJwt(roleToken).role === 'citizen');
 
-  console.log(`\n[step3] ${passed} passed, ${failed} failed`);
+  // ─── Step 5, test 1: offline idempotency ──────────────────────────────────
+  console.log('\nstep 9 — offline idempotency: retry with same clientId on reconnect');
+  const offlineId = `offline-${Date.now()}`;
+  // Capture baseline count right before the offline simulation
+  const mineBeforeOffline = (await api('GET', '/reports/mine', { token: citizen })).body?.length ?? 0;
+
+  // First submission (simulated "offline" - we just send it)
+  const offlineFirst = await api('POST', '/reports', {
+    token: citizen,
+    body: reportBody({
+      needType: 'Food',
+      description: 'Offline test: food shortage reported while offline.',
+      lat: 6.4901,
+      lng: 3.4201,
+      clientId: offlineId,
+    }),
+  });
+  check('offline first submit -> 201', offlineFirst.status === 201, offlineFirst.body);
+
+  // Simulate reconnect: user retries with SAME clientId
+  const offlineRetry = await api('POST', '/reports', {
+    token: citizen,
+    body: reportBody({
+      needType: 'Food',
+      description: 'Offline test: retry after reconnect (same clientId).',
+      lat: 6.4901,
+      lng: 3.4201,
+      clientId: offlineId,
+    }),
+  });
+  check('offline retry with same clientId -> 200', offlineRetry.status === 200, offlineRetry.body);
+  check('retry returns same report id', offlineRetry.body?.id === offlineFirst.body?.id, {
+    first: offlineFirst.body?.id,
+    retry: offlineRetry.body?.id,
+  });
+
+  // Verify count increased by exactly 1 from our baseline
+  const mineAfterOffline = (await api('GET', '/reports/mine', { token: citizen })).body?.length ?? 0;
+  check('exactly one report created for the offline session', mineAfterOffline === mineBeforeOffline + 1, {
+    before: mineBeforeOffline,
+    after: mineAfterOffline,
+  });
+
+  // ─── Step 5, test 2: role tamper ──────────────────────────────────────────
+  console.log('\nstep 10 — role tamper: localStorage role edit -> server 403');
+  // Register a fresh citizen
+  const tamperEmail = `tamper-${Date.now()}@aidpulse.local`;
+  const tamperReg = await api('POST', '/auth/register', {
+    body: { name: 'Tamper Test', email: tamperEmail, password: 'Tamper123!', role: 'citizen' },
+  });
+  check('register tamper citizen -> 201', tamperReg.status === 201, tamperReg.body);
+  const tamperToken = tamperReg.body?.token;
+
+  // Verify the token payload says citizen
+  check('token payload role = citizen', decodeJwt(tamperToken).role === 'citizen');
+
+  // Now try to use that citizen token on an NGO-only endpoint (claim)
+  const testReport = await api('POST', '/reports', {
+    token: citizen,
+    body: reportBody({
+      needType: 'Shelter',
+      description: 'Role tamper test: shelter report for claim attempt.',
+      lat: 6.5001,
+      lng: 3.4301,
+    }),
+  });
+  check('citizen creates test report -> 201', testReport.status === 201, testReport.body);
+
+  const tamperClaim = await api('PATCH', `/reports/${testReport.body.id}/claim`, { token: tamperToken });
+  check('citizen token on NGO-only claim endpoint -> 403', tamperClaim.status === 403, tamperClaim.body);
+
+  // Also try nearby (ngo/government/admin only)
+  const tamperNearby = await api('GET', '/reports/nearby?lat=6.455&lng=3.3841', { token: tamperToken });
+  check('citizen token on nearby endpoint -> 403', tamperNearby.status === 403, tamperNearby.body);
+
+  // Also try /reports list (ngo/government/admin only)
+  const tamperList = await api('GET', '/reports', { token: tamperToken });
+  check('citizen token on reports list -> 403', tamperList.status === 403, tamperList.body);
+
+  // ─── Step 5, test 3: realtime propagation ─────────────────────────────────
+  console.log('\nstep 11 — realtime: citizen submit -> NGO + government receive report:new');
+  const ngoSocket = await connectSocket(ngo1);
+  const govSocket = await connectSocket(ngo2); // gov@aidpulse.local is government role
+
+  let ngoReceived = null;
+  let govReceived = null;
+
+  ngoSocket.on('report:new', (report) => { ngoReceived = report; });
+  govSocket.on('report:new', (report) => { govReceived = report; });
+
+  // Give sockets a moment to register handlers
+  await new Promise((r) => setTimeout(r, 200));
+
+  // Citizen submits a new report
+  const realtimeReport = await api('POST', '/reports', {
+    token: citizen,
+    body: reportBody({
+      needType: 'Rescue',
+      description: 'Realtime test: rescue needed at collapsed building.',
+      lat: 6.5101,
+      lng: 3.4401,
+    }),
+  });
+  check('citizen creates realtime test report -> 201', realtimeReport.status === 201, realtimeReport.body);
+
+  // Wait for socket events to propagate
+  await new Promise((r) => setTimeout(r, 800));
+
+  check('NGO socket received report:new', ngoReceived !== null && ngoReceived.id === realtimeReport.body.id, ngoReceived);
+  check('Government socket received report:new', govReceived !== null && govReceived.id === realtimeReport.body.id, govReceived);
+
+  // Verify the payload shape matches what frontend expects
+  if (ngoReceived) {
+    check('NGO payload has needType label', ngoReceived.needType === 'Rescue', ngoReceived);
+    check('NGO payload has lat/lng', typeof ngoReceived.lat === 'number' && typeof ngoReceived.lng === 'number');
+    check('NGO payload has distance', typeof ngoReceived.distance === 'number');
+  }
+  if (govReceived) {
+    check('Gov payload has needType label', govReceived.needType === 'Rescue', govReceived);
+    check('Gov payload has lat/lng', typeof govReceived.lat === 'number' && typeof govReceived.lng === 'number');
+    check('Gov payload has distance', typeof govReceived.distance === 'number');
+  }
+
+  ngoSocket.disconnect();
+  govSocket.disconnect();
+
+  console.log(`\n[step5] ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
 
 main().catch((err) => {
-  console.error('[step3] crashed:', err.message);
+  console.error('[step5] crashed:', err.message);
   process.exit(1);
 });

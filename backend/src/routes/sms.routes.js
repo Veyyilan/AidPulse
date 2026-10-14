@@ -92,7 +92,7 @@ router.post(
       source: 'sms',
     });
 
-    const payload = serializeReport(report);
+    const payload = serializeReport(report, { distanceKm: 0 });
     emitToRooms(OPERATIONAL_ROOMS, 'report:new', payload);
     detectAndEmitGap(lat, lng).catch(() => {});
 

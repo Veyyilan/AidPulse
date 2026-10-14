@@ -100,7 +100,7 @@ router.post(
       throw err;
     }
 
-    const payload = serializeReport(report);
+    const payload = serializeReport(report, { distanceKm: 0 });
     emitToRooms(OPERATIONAL_ROOMS, 'report:new', payload);
 
     // Detect a coverage gap around the new report (may emit gap:alert).
