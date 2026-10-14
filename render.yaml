@@ -1,0 +1,40 @@
+# Render Blueprint for AidPulse Backend
+# Deploy: https://dashboard.render.com/blueprints/new
+
+services:
+  - type: web
+    name: aidpulse-api
+    runtime: node
+    plan: free
+    region: oregon  # or your preferred region
+    branch: main
+    rootDir: backend
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: MONGO_URI
+        sync: false  # Set manually in dashboard
+      - key: JWT_SECRET
+        sync: false  # Set manually in dashboard
+      - key: JWT_EXPIRES_IN
+        value: "1h"
+      - key: CLIENT_ORIGIN
+        sync: false  # Set after Vercel deploy
+      - key: STALE_CLAIM_HOURS
+        value: "4"
+      - key: SMS_API_KEY
+        sync: false
+      - key: DEPLOYMENT_REGION_BOUNDS
+        sync: false
+      - key: GAP_CELL_THRESHOLD
+        value: "3"
+      - key: GEOCODE_ON_SMS
+        value: "false"
+
+# Optional: Add a cron job for stale claims (handled by node-cron in-app)
+# Render Free tier doesn't support background workers, so we use in-process cron.
