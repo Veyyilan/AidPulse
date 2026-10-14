@@ -82,6 +82,8 @@ export function AuthProvider({ children }) {
   const logout = useCallback(() => {
     setUser(null)
     localStorage.removeItem('aidpulse_user')
+    // Notify socket + offline queue to clean up
+    window.dispatchEvent(new CustomEvent('aidpulse:auth-expired'))
   }, [])
 
   return (
