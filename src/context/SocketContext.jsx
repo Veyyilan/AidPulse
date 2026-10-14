@@ -1,4 +1,4 @@
-﻿import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react'
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react'
 import { useAuth } from './AuthContext'
 
 const SocketContext = createContext(null)
@@ -35,8 +35,12 @@ export function SocketProvider({ children }) {
 
     let socket
     import('socket.io-client').then(({ io }) => {
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:4000'
-      socket = io(apiUrl, {
+      // Strip any /api path suffix — socket.io must connect to the origin only.
+      // VITE_API_URL ends in /api (used by axios); passing that to io() would
+      // make socket.io treat "/api" as a namespace, silently breaking realtime.
+      const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:4000/api'
+      const socketUrl = apiBase.replace(/\/api\/?$/, '')
+      socket = io(socketUrl, {
         auth: { token: user.token },
         transports: ['websocket'],
         reconnectionAttempts: 5,
