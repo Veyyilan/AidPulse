@@ -85,7 +85,7 @@ export function useGeolocation() {
         if (err.code === 1) setDenied(true)
         setError(geoMsg(err.code))
       },
-      { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
     )
   }, [stop, applyBest])
 

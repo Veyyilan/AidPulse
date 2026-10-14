@@ -31,23 +31,35 @@ export const NEED_STATUS_LABELS = {
 // NGO capability options (maps to need types)
 export const NGO_CAPABILITIES = NEED_TYPES
 
-// Normalize a backend report into our frontend shape (handles both old and new API)
+// Normalize a backend report into our frontend shape.
+// The API need objects use `type`; we expose them as `needType` for the UI.
 export function normalizeReport(raw) {
   if (!raw) return null
-  // Multi-need shape: { needs: [{needType, status, claimedBy}] }
+
   let needs = raw.needs
   if (!needs && raw.needType) {
     // Legacy single-need report: wrap it
-    needs = [{ needType: raw.needType?.toLowerCase?.() || raw.needType, status: raw.status || 'pending', claimedBy: raw.claimedBy || null }]
+    needs = [{ type: raw.needType, status: raw.status || 'pending', claimedBy: raw.claimedBy || null }]
   }
   needs = (needs || []).map(n => ({
-    needType: n.needType?.toLowerCase?.() || n.needType || 'rescue',
-    status:   n.status   || 'pending',
-    claimedBy: n.claimedBy || null,
+    needType:  (n.type || n.needType || '').toLowerCase() || 'rescue',
+    status:    n.status || 'pending',
+    claimedBy: n.claimedBy ? String(n.claimedBy) : null,
+    claimedAt: n.claimedAt || null,
+    updatedAt: n.updatedAt || null,
   }))
 
   const lat = raw.lat ?? raw.location?.coordinates?.[1]
   const lng = raw.lng ?? raw.location?.coordinates?.[0]
+
+  // The backend has no top-level status — derive one from the needs so the
+  // list filters keep working.
+  const states = needs.map(n => n.status)
+  const aggregate =
+    states.length > 0 && states.every(s => s === 'resolved') ? 'resolved'
+    : states.some(s => s === 'in_progress')                  ? 'in_progress'
+    : states.some(s => s === 'claimed')                      ? 'claimed'
+    : 'pending'
 
   return {
     id:           raw.id || String(raw._id),
@@ -58,9 +70,13 @@ export function normalizeReport(raw) {
     lat:          typeof lat === 'number' ? lat : null,
     lng:          typeof lng === 'number' ? lng : null,
     accuracyMeters: raw.accuracyMeters ?? raw.accuracy ?? null,
-    status:       raw.status || 'pending',
+    status:       raw.status || aggregate,
     distance:     raw.distance ?? null,
-    duplicateCount: raw.duplicateCount ?? 0,
+    // `mergedCount` comes from /gov/clusters; otherwise infer from reporterCount.
+    duplicateCount: raw.mergedCount ?? Math.max(0, (raw.reporterCount ?? 1) - 1),
+    reporterCount:  raw.reporterCount ?? 1,
+    flags:        raw.flags || [],
+    mergedInto:   raw.mergedInto ? String(raw.mergedInto) : null,
     createdAt:    raw.createdAt,
     clientId:     raw.clientId,
     _queued:      raw._queued || false,

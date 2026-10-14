@@ -93,10 +93,11 @@ function PinMarker({ pin, onDragEnd }) {
 function MapController({ center, zoom }) {
   const map = useMap()
   const prev = useRef(null)
+  // Always recenter if center changed meaningfully; also re-center on first mount
   if (!prev.current ||
-      prev.current[0] !== center[0] ||
-      prev.current[1] !== center[1]) {
-    prev.current = center
+      Math.abs(prev.current[0] - center[0]) > 1e-5 ||
+      Math.abs(prev.current[1] - center[1]) > 1e-5) {
+    prev.current = [center[0], center[1]]
     map.setView(center, zoom ?? map.getZoom(), { animate: true })
   }
   return null

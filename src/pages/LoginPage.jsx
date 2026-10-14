@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { authApi } from '../api/endpoints'
+import { identityApi } from '../api/endpoints'
 
 // ─── Pulse animation ─────────────────────────────────────────────────────────
 function PulseLine() {
@@ -134,9 +134,9 @@ function RegisterForm({ onSwitch, digilockerMode }) {
     if (name.trim().length < 2)    e.name     = 'Name must be at least 2 characters'
     if (!emailRe.test(email))       e.email    = 'Enter a valid email address'
     const digits = phone.replace(/\s+/g, '')
-    if (digits && !phoneRe.test(digits))
-      e.phone = 'Enter a valid 10-digit Indian mobile number (starts 6–9)'
-    if (password.length < 6)        e.password = 'Password must be at least 6 characters'
+    if (!digits)                     e.phone    = 'Phone number is required'
+    else if (!phoneRe.test(digits))  e.phone    = 'Enter a valid 10-digit Indian mobile number (starts 6–9)'
+    if (password.length < 8)        e.password = 'Password must be at least 8 characters'
     if (!consent)                   e.consent  = 'You must agree to continue'
     return e
   }
@@ -144,7 +144,7 @@ function RegisterForm({ onSwitch, digilockerMode }) {
   const handleDigiLocker = async () => {
     try {
       setBusy(true)
-      const { data } = await authApi.digilockerStart()
+      const { data } = await identityApi.digilockerStart()
       if (data?.url) window.location.href = data.url
     } catch {
       setApiErr('DigiLocker verification unavailable. Please continue without it.')
@@ -170,9 +170,9 @@ function RegisterForm({ onSwitch, digilockerMode }) {
 
     try {
       const digits = phone.replace(/\s+/g, '')
-      const formattedPhone = digits ? `+91${digits}` : undefined
-      await register(name.trim(), email.trim(), formattedPhone, password)
-      navigate('/citizen')
+      await register(name.trim(), email.trim(), digits, password, consent)
+      // After registration, go back to login so user enters credentials again
+      onSwitch()
     } catch (err) {
       setApiErr(err.message || 'Registration failed. Please try again.')
     } finally {
@@ -255,7 +255,7 @@ function RegisterForm({ onSwitch, digilockerMode }) {
 
           <div style={{ marginBottom: '1.75rem' }}>
             <label className="field-label" htmlFor="reg-phone">
-              Mobile number (+91, optional)
+              Mobile number (+91)
             </label>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem' }}>
               <span style={{
@@ -284,7 +284,7 @@ function RegisterForm({ onSwitch, digilockerMode }) {
 
           <div style={{ marginBottom: '1.75rem' }}>
             <label className="field-label" htmlFor="reg-password">
-              Password (min. 6 characters)
+              Password (min. 8 characters)
             </label>
             <input
               id="reg-password"

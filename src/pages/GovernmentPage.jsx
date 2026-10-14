@@ -5,7 +5,7 @@ import { useSocket } from '../context/SocketContext'
 import AidMap, { DEFAULT_TN_CENTER } from '../components/AidMap'
 import { NeedBadge, StatusLabel } from '../components/StatusIndicators'
 import Toast from '../components/Toast'
-import { statsApi, usersApi } from '../api/endpoints'
+import { govApi } from '../api/endpoints'
 import { NEED_TYPES, NEED_LABELS, NGO_CAPABILITIES, normalizeReport } from '../utils/domain'
 
 const REPORT_STATUSES = ['pending', 'claimed', 'in_progress', 'resolved']
@@ -59,29 +59,33 @@ function GapAlerts({ gaps }) {
   )
   return (
     <ul className="ruled-list" style={{ padding: '0 1.5rem' }}>
-      {gaps.map(g => (
-        <li key={g.id} style={{ fontSize: '0.875rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <code style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>
-              {Number(g.lat).toFixed(4)}, {Number(g.lng).toFixed(4)}
-            </code>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', opacity: 0.6 }}>
-              {g.count} reports · r={g.radius}m
-            </span>
-          </div>
-          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.4rem', flexWrap: 'wrap' }}>
-            {(g.needTypes || []).map(nt => (
-              <NeedBadge key={nt} needType={nt} />
-            ))}
-          </div>
-        </li>
-      ))}
+      {gaps.map(g => {
+        const hasCoords = g.lat != null && g.lng != null
+        return (
+          <li key={g.cellKey || `${g.lat},${g.lng}`} style={{ fontSize: '0.875rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <code style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>
+                {hasCoords ? `${Number(g.lat).toFixed(4)}, ${Number(g.lng).toFixed(4)}` : g.cellKey}
+              </code>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', opacity: 0.6 }}>
+                {g.count} pending
+                {g.thresholdMinutes != null ? ` · >${g.thresholdMinutes} min` : ''}
+              </span>
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.4rem', flexWrap: 'wrap' }}>
+              {(g.needTypes || []).map(nt => (
+                <NeedBadge key={nt} needType={nt} />
+              ))}
+            </div>
+          </li>
+        )
+      })}
     </ul>
   )
 }
 
 // ─── Cluster / merge list ─────────────────────────────────────────────────────
-function ClusterList({ reports }) {
+function ClusterList({ reports, onForceRelease, releasing = {} }) {
   const clusters = useMemo(() => {
     return reports
       .filter(r => r.duplicateCount > 0)
@@ -102,27 +106,48 @@ function ClusterList({ reports }) {
             <th>Needs</th>
             <th>Similar reports</th>
             <th>Status</th>
+            <th>Action</th>
           </tr>
         </thead>
         <tbody>
-          {clusters.map(r => (
-            <tr key={r.id}>
-              <td>
-                <code style={{ fontFamily: 'var(--font-mono)', fontSize: '0.7rem' }}>
-                  {Number(r.lat).toFixed(4)}, {Number(r.lng).toFixed(4)}
-                </code>
-              </td>
-              <td>
-                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
-                  {(r.needs || []).map(n => <NeedBadge key={n.needType} needType={n.needType} />)}
-                </div>
-              </td>
-              <td style={{ fontFamily: 'var(--font-serif)', fontSize: '1.2rem' }}>
-                +{r.duplicateCount}
-              </td>
-              <td><StatusLabel status={r.status} /></td>
-            </tr>
-          ))}
+          {clusters.map(r => {
+            const hasActive = (r.needs || []).some(
+              n => n.status === 'claimed' || n.status === 'in_progress'
+            )
+            return (
+              <tr key={r.id}>
+                <td>
+                  <code style={{ fontFamily: 'var(--font-mono)', fontSize: '0.7rem' }}>
+                    {Number(r.lat).toFixed(4)}, {Number(r.lng).toFixed(4)}
+                  </code>
+                </td>
+                <td>
+                  <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                    {(r.needs || []).map(n => <NeedBadge key={n.needType} needType={n.needType} />)}
+                  </div>
+                </td>
+                <td style={{ fontFamily: 'var(--font-serif)', fontSize: '1.2rem' }}>
+                  +{r.duplicateCount}
+                </td>
+                <td><StatusLabel status={r.status} /></td>
+                <td>
+                  {hasActive ? (
+                    <button
+                      type="button"
+                      className="btn-text"
+                      disabled={!!releasing[r.id]}
+                      onClick={() => onForceRelease?.(r.id)}
+                      style={{ fontSize: '0.75rem', whiteSpace: 'nowrap' }}
+                    >
+                      {releasing[r.id] ? '…' : 'Force release'}
+                    </button>
+                  ) : (
+                    <span style={{ opacity: 0.3, fontSize: '0.8125rem' }}>—</span>
+                  )}
+                </td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
@@ -148,9 +173,11 @@ function RegisterNgoModal({ onCreated, onClose }) {
     if (!capabilities.length) { setErr('Select at least one capability.'); return }
     setLoading(true); setErr('')
     try {
-      const res = await usersApi.registerNgo({
-        name, email, password,
-        organizationName: orgName,
+      const res = await govApi.createNgo({
+        name,
+        email,
+        password: password || undefined,
+        organizationName: orgName || undefined,
         phone: phone || undefined,
         capabilities,
       })
@@ -187,14 +214,14 @@ function RegisterNgoModal({ onCreated, onClose }) {
             { id: 'ngo-org',     label: 'Organization name',        val: orgName, set: setOrgName, type: 'text' },
             { id: 'ngo-email',   label: 'Email address',            val: email,   set: setEmail,   type: 'email' },
             { id: 'ngo-phone',   label: 'Contact phone (optional)', val: phone,   set: setPhone,   type: 'tel' },
-            { id: 'ngo-pwd',     label: 'Temporary password (min. 6 chars)', val: password, set: setPassword, type: 'password' },
+            { id: 'ngo-pwd',     label: 'Temporary password (min. 8 chars, optional)', val: password, set: setPassword, type: 'password' },
           ].map(({ id, label, val, set, type }) => (
             <div key={id} style={{ marginBottom: '1.25rem' }}>
               <label className="field-label" htmlFor={id}>{label}</label>
               <input
                 id={id}
                 type={type}
-                required={id !== 'ngo-phone'}
+                required={!['ngo-phone', 'ngo-pwd'].includes(id)}
                 className="input-underline"
                 value={val}
                 onChange={e => set(e.target.value)}
@@ -249,21 +276,22 @@ export default function GovernmentPage() {
   const { gaps }              = useSocket()
 
   const [tab,          setTab]          = useState('map')  // 'map' | 'gaps' | 'clusters' | 'ngos'
-  const [stats,        setStats]        = useState(null)
-  const [users,        setUsers]        = useState([])
+  const [ngos,         setNgos]         = useState([])
+  const [gapCells,     setGapCells]     = useState([])
   const [showNgoModal, setShowNgoModal] = useState(false)
   const [toast,        setToast]        = useState(null)
   const [statusFilter, setStatusFilter] = useState('')
   const [needFilter,   setNeedFilter]   = useState('')
-  const [suspending,   setSuspending]   = useState({})
+  const [busyIds,      setBusyIds]      = useState({})
 
   useEffect(() => {
     let cancelled = false
-    statsApi.overview().then(r => { if (!cancelled) setStats(r.data) }).catch(() => {
-      if (!cancelled) setStats({ totalReports: 0, pending: 0, claimed: 0, resolved: 0, coverageGaps: 0 })
-    })
-    usersApi.list().then(r => { if (!cancelled) setUsers(Array.isArray(r.data) ? r.data : []) })
-      .catch(() => { if (!cancelled) setUsers([]) })
+    govApi.listNgos()
+      .then(r => { if (!cancelled) setNgos(Array.isArray(r.data) ? r.data : []) })
+      .catch(() => { if (!cancelled) setNgos([]) })
+    govApi.gaps()
+      .then(r => { if (!cancelled) setGapCells(Array.isArray(r.data) ? r.data : []) })
+      .catch(() => { if (!cancelled) setGapCells([]) })
     return () => { cancelled = true }
   }, [])
 
@@ -277,45 +305,61 @@ export default function GovernmentPage() {
     })
   }, [normalizedReports, statusFilter, needFilter])
 
-  const ngoUsers = useMemo(() => users.filter(u => u.role === 'ngo'), [users])
+  // Merge the gap cells fetched at load with any live gap:alert events.
+  const mergedGaps = useMemo(() => {
+    const byKey = new Map()
+    for (const g of gapCells) byKey.set(g.cellKey || `${g.lat},${g.lng}`, g)
+    for (const g of gaps)     byKey.set(g.cellKey || `${g.lat},${g.lng}`, g)
+    return [...byKey.values()].sort((a, b) => (b.count ?? 0) - (a.count ?? 0))
+  }, [gapCells, gaps])
 
-  const handleForceRelease = async (uid) => {
-    setSuspending(p => ({ ...p, [uid]: 'releasing' }))
+  // There is no /gov stats endpoint — derive the strip from the reports we hold.
+  const stats = useMemo(() => ({
+    totalReports: normalizedReports.length,
+    pending:  normalizedReports.filter(r => r.status === 'pending').length,
+    claimed:  normalizedReports.filter(r => r.status === 'claimed' || r.status === 'in_progress').length,
+    resolved: normalizedReports.filter(r => r.status === 'resolved').length,
+    coverageGaps: mergedGaps.length,
+  }), [normalizedReports, mergedGaps])
+
+  const handleForceRelease = async (reportId) => {
+    setBusyIds(p => ({ ...p, [reportId]: 'releasing' }))
     try {
-      await usersApi.forceRelease(uid)
+      await govApi.forceRelease(reportId)
       setToast('Stale claims released.')
+      refresh()
     } catch {
-      setToast('Force release failed.')
+      setToast('Force release failed — nothing claimed on that report.')
     } finally {
-      setSuspending(p => ({ ...p, [uid]: '' }))
+      setBusyIds(p => ({ ...p, [reportId]: '' }))
     }
   }
 
   const handleSuspend = async (uid) => {
-    setSuspending(p => ({ ...p, [uid]: 'suspending' }))
+    setBusyIds(p => ({ ...p, [uid]: 'suspending' }))
     try {
-      await usersApi.suspend(uid)
-      setUsers(prev => prev.map(u => u.id === uid ? { ...u, status: 'suspended' } : u))
-      setToast('User suspended.')
+      await govApi.suspend(uid)
+      setNgos(prev => prev.map(u => u.id === uid ? { ...u, isSuspended: true } : u))
+      setToast('NGO suspended.')
     } catch { setToast('Suspend failed.') }
-    finally { setSuspending(p => ({ ...p, [uid]: '' })) }
+    finally { setBusyIds(p => ({ ...p, [uid]: '' })) }
   }
 
   const handleRestore = async (uid) => {
-    setSuspending(p => ({ ...p, [uid]: 'restoring' }))
+    setBusyIds(p => ({ ...p, [uid]: 'restoring' }))
     try {
-      await usersApi.restore(uid)
-      setUsers(prev => prev.map(u => u.id === uid ? { ...u, status: 'active' } : u))
-      setToast('User restored.')
+      await govApi.restore(uid)
+      setNgos(prev => prev.map(u => u.id === uid ? { ...u, isSuspended: false } : u))
+      setToast('NGO restored.')
     } catch { setToast('Restore failed.') }
-    finally { setSuspending(p => ({ ...p, [uid]: '' })) }
+    finally { setBusyIds(p => ({ ...p, [uid]: '' })) }
   }
 
   const TABS = [
     { id: 'map',      label: 'Live map' },
-    { id: 'gaps',     label: `Gaps ${gaps.length > 0 ? `(${gaps.length})` : ''}` },
+    { id: 'gaps',     label: `Gaps ${mergedGaps.length > 0 ? `(${mergedGaps.length})` : ''}` },
     { id: 'clusters', label: 'Clusters' },
-    { id: 'ngos',     label: `NGOs (${ngoUsers.length})` },
+    { id: 'ngos',     label: `NGOs (${ngos.length})` },
   ]
 
   return (
@@ -323,7 +367,12 @@ export default function GovernmentPage() {
       {toast && <Toast message={toast} onDone={() => setToast(null)} />}
       {showNgoModal && (
         <RegisterNgoModal
-          onCreated={ngo => { setUsers(p => [ngo, ...p]); setToast(`NGO ${ngo.name} created.`) }}
+          onCreated={({ ngo, tempPassword }) => {
+            setNgos(p => [ngo, ...p])
+            setToast(tempPassword
+              ? `NGO ${ngo.name} created — temporary password: ${tempPassword}`
+              : `NGO ${ngo.name} created.`)
+          }}
           onClose={() => setShowNgoModal(false)}
         />
       )}
@@ -419,7 +468,7 @@ export default function GovernmentPage() {
           <p style={{ padding: '0 1.5rem', opacity: 0.55, fontSize: '0.875rem', marginBottom: '1.5rem' }}>
             Areas with multiple unresolved reports and no NGO response detected via real-time analysis.
           </p>
-          <GapAlerts gaps={gaps} />
+          <GapAlerts gaps={mergedGaps} />
         </div>
       )}
 
@@ -429,14 +478,14 @@ export default function GovernmentPage() {
           <p style={{ padding: '0 1.5rem', opacity: 0.55, fontSize: '0.875rem', marginBottom: '1.5rem' }}>
             Reports within 150 m of each other are grouped. Original reports are preserved — nothing is deleted.
           </p>
-          <ClusterList reports={normalizedReports} />
+          <ClusterList reports={normalizedReports} onForceRelease={handleForceRelease} releasing={busyIds} />
         </div>
       )}
 
       {tab === 'ngos' && (
         <div style={{ flex: 1, overflowY: 'auto', padding: '1.5rem' }}>
           <h3 style={{ marginBottom: '1.25rem' }}>Registered NGOs</h3>
-          {ngoUsers.length === 0 ? (
+          {ngos.length === 0 ? (
             <div style={{ opacity: 0.45, padding: '2rem 0', textAlign: 'center' }}>
               <p style={{ fontSize: '0.9375rem' }}>No NGO accounts yet. Create one above.</p>
             </div>
@@ -454,8 +503,8 @@ export default function GovernmentPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {ngoUsers.map(u => (
-                    <tr key={u.id} style={{ opacity: u.status === 'suspended' ? 0.5 : 1 }}>
+                  {ngos.map(u => (
+                    <tr key={u.id} style={{ opacity: u.isSuspended ? 0.5 : 1 }}>
                       <td style={{ fontWeight: 500 }}>{u.organizationName || u.name}</td>
                       <td>{u.name}</td>
                       <td><code style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>{u.email}</code></td>
@@ -472,42 +521,30 @@ export default function GovernmentPage() {
                           ))}
                         </div>
                       </td>
-                      <td><StatusLabel status={u.status === 'suspended' ? 'pending' : 'resolved'} /></td>
+                      <td><StatusLabel status={u.isSuspended ? 'suspended' : 'active'} /></td>
                       <td>
                         <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-                          {u.status !== 'suspended' ? (
-                            <>
-                              <button
-                                id={`force-release-${u.id}`}
-                                type="button"
-                                className="btn-text"
-                                disabled={!!suspending[u.id]}
-                                onClick={() => handleForceRelease(u.id)}
-                                style={{ fontSize: '0.75rem' }}
-                              >
-                                {suspending[u.id] === 'releasing' ? '…' : 'Force release'}
-                              </button>
-                              <button
-                                id={`suspend-${u.id}`}
-                                type="button"
-                                className="btn-text"
-                                disabled={!!suspending[u.id]}
-                                onClick={() => handleSuspend(u.id)}
-                                style={{ fontSize: '0.75rem' }}
-                              >
-                                {suspending[u.id] === 'suspending' ? '…' : 'Suspend'}
-                              </button>
-                            </>
+                          {!u.isSuspended ? (
+                            <button
+                              id={`suspend-${u.id}`}
+                              type="button"
+                              className="btn-text"
+                              disabled={!!busyIds[u.id]}
+                              onClick={() => handleSuspend(u.id)}
+                              style={{ fontSize: '0.75rem' }}
+                            >
+                              {busyIds[u.id] === 'suspending' ? '…' : 'Suspend'}
+                            </button>
                           ) : (
                             <button
                               id={`restore-${u.id}`}
                               type="button"
                               className="btn-text"
-                              disabled={!!suspending[u.id]}
+                              disabled={!!busyIds[u.id]}
                               onClick={() => handleRestore(u.id)}
                               style={{ fontSize: '0.75rem' }}
                             >
-                              {suspending[u.id] === 'restoring' ? '…' : 'Restore'}
+                              {busyIds[u.id] === 'restoring' ? '…' : 'Restore'}
                             </button>
                           )}
                         </div>

@@ -4,7 +4,7 @@ import { StatusLabel } from "../components/StatusIndicators"
 import Toast from "../components/Toast"
 import { useReports } from "../hooks/useReports"
 import { useAuth } from "../context/AuthContext"
-import { statsApi, usersApi } from "../api/endpoints"
+import { govApi } from "../api/endpoints"
 
 export default function AdminPage() {
   const { user } = useAuth()
@@ -16,13 +16,13 @@ export default function AdminPage() {
 
   useEffect(() => {
     let cancelled = false
-    statsApi.clusters().then(res => {
+    govApi.clusters().then(res => {
       if (!cancelled) setClusters(Array.isArray(res.data) ? res.data : [])
     }).catch(() => {
       if (!cancelled) setClusters([])
     })
 
-    usersApi.list().then(res => {
+    govApi.listNgos().then(res => {
       if (!cancelled) setUsers(Array.isArray(res.data) ? res.data : [])
     }).catch(() => {
       if (!cancelled) setUsers([])
@@ -33,7 +33,7 @@ export default function AdminPage() {
 
   const handleForceRelease = async (clId) => {
     try {
-      await statsApi.gaps()
+      await govApi.gaps()
       setClusters(prev => prev.map(c => c.id === clId ? { ...c, staleClaims: 0 } : c))
       setToast("Stale claims released.")
     } catch {
@@ -43,7 +43,7 @@ export default function AdminPage() {
 
   const handleSuspend = async (uid) => {
     try {
-      await usersApi.suspend(uid)
+      await govApi.suspend(uid)
       setUsers(prev => prev.map(u => u.id === uid ? { ...u, status: "suspended" } : u))
       setToast("User suspended.")
     } catch {
@@ -53,7 +53,7 @@ export default function AdminPage() {
 
   const handleRestore = async (uid) => {
     try {
-      await usersApi.restore(uid)
+      await govApi.restore(uid)
       setUsers(prev => prev.map(u => u.id === uid ? { ...u, status: "active" } : u))
       setToast("User restored.")
     } catch {

@@ -41,11 +41,14 @@ export function AuthProvider({ children }) {
     setLoading(false)
   }, [fetchMe])
 
-  const login = useCallback(async (email, password) => {
+  const login = useCallback(async (identifier, password) => {
+    const id = String(identifier ?? '').trim()
+    // Citizens sign in with a phone; NGO/government with an email.
+    const body = id.includes('@') ? { email: id, password } : { phone: id, password }
     const res = await fetch(`${apiUrl}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify(body),
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
@@ -59,10 +62,11 @@ export function AuthProvider({ children }) {
     return fullUser
   }, [apiUrl, fetchMe])
 
-  // phone is already formatted as +91XXXXXXXXXX by the form
-  const register = useCallback(async (name, email, phone, password) => {
-    const body = { name, email, password, role: 'citizen' }
-    if (phone) body.phone = phone
+  // phone is a bare 10-digit number; the API stores it as +91XXXXXXXXXX.
+  // consent=true is required by the API and recorded as consentAt.
+  const register = useCallback(async (name, email, phone, password, consent = true) => {
+    const body = { name, email, phone, password, consent, role: 'citizen' }
+    if (!phone) delete body.phone
     const res = await fetch(`${apiUrl}/auth/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -80,6 +84,26 @@ export function AuthProvider({ children }) {
     return fullUser
   }, [apiUrl, fetchMe])
 
+  const changePassword = useCallback(async (currentPassword, newPassword) => {
+    const res = await fetch(`${apiUrl}/auth/change-password`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${user?.token}`,
+      },
+      body: JSON.stringify({ currentPassword, newPassword }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || err.message || 'Could not change password')
+    }
+    setUser(prev => {
+      const next = { ...prev, mustChangePassword: false }
+      localStorage.setItem('aidpulse_user', JSON.stringify(next))
+      return next
+    })
+  }, [apiUrl, user])
+
   const logout = useCallback(() => {
     setUser(null)
     localStorage.removeItem('aidpulse_user')
@@ -89,7 +113,7 @@ export function AuthProvider({ children }) {
   }, [])
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout, changePassword }}>
       {children}
     </AuthContext.Provider>
   )

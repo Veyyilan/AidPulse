@@ -6,6 +6,7 @@ import { SocketProvider }            from './context/SocketContext'
 import ProtectedRoute                from './components/ProtectedRoute'
 import Nav                           from './components/Nav'
 import Footer                        from './components/Footer'
+import ForcePasswordChange           from './components/ForcePasswordChange'
 
 import LoginPage      from './pages/LoginPage'
 import CitizenPage    from './pages/CitizenPage'
@@ -34,6 +35,16 @@ function RootRedirect() {
 
 function AppShell() {
   const { user } = useAuth()
+  // Government-provisioned NGOs (and the government account) must change the
+  // temporary password before any other route is allowed.
+  if (user?.mustChangePassword) {
+    return (
+      <>
+        <Nav />
+        <main><ForcePasswordChange /></main>
+      </>
+    )
+  }
   return (
     <>
       <OfflineBanner />

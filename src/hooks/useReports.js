@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext'
 import { useOffline } from '../context/OfflineContext'
 import { useSocket } from '../context/SocketContext'
 import { reportsApi } from '../api/endpoints'
+import { normalizeReport } from '../utils/domain'
 
 const CACHE_PREFIX = 'aidpulse_reports_'
 
@@ -52,12 +53,16 @@ export function useReports(role = 'citizen') {
       let changed = false
       const next = prev.map(r => {
         const u = liveUpdates[r.id]
-        if (u && JSON.stringify(u) !== JSON.stringify(r)) { changed = true; return { ...r, ...u } }
+        if (u) {
+          const nu = normalizeReport(u)
+          if (nu && JSON.stringify(nu) !== JSON.stringify(r)) { changed = true; return { ...r, ...nu } }
+        }
         return r
       })
       // add brand-new reports not yet in list
       Object.values(liveUpdates).forEach(u => {
-        if (!next.find(r => r.id === u.id)) { next.unshift(u); changed = true }
+        const nu = normalizeReport(u)
+        if (nu && !next.find(r => r.id === nu.id)) { next.unshift(nu); changed = true }
       })
       if (changed) cacheSet(role, next)
       return changed ? next : prev
@@ -79,7 +84,8 @@ export function useReports(role = 'citizen') {
       let res
       if (role === 'citizen') res = await reportsApi.mine()
       else res = await reportsApi.all()
-      const data = Array.isArray(res.data) ? res.data : []
+      const raw = Array.isArray(res.data) ? res.data : []
+      const data = raw.map(normalizeReport).filter(Boolean)
       setReports(data)
       cacheSet(role, data)
     } catch (e) {
@@ -98,18 +104,20 @@ export function useReports(role = 'citizen') {
   }, [fetch])
 
   // Per-report clientId tracking: { [clientId]: localReportId }
-  const submit = useCallback(async ({ needTypes, lat, lng, accuracyMeters, locationSource }) => {
+  const submit = useCallback(async ({ needs, lat, lng, accuracyMeters }) => {
     const clientId = crypto.randomUUID()
-    const payload  = { needTypes, lat, lng, accuracyMeters, locationSource, clientId }
+    const payload  = { needs, lat, lng, accuracyMeters: accuracyMeters ?? undefined, clientId }
 
     // Optimistic local record
     const optimistic = {
       id: `local-${clientId}`,
-      needTypes,
-      lat, lng, accuracyMeters,
+      needs: needs.map(nt => ({ needType: nt, status: 'pending', claimedBy: null })),
+      needType: needs[0],
+      lat, lng, accuracyMeters: accuracyMeters ?? null,
       status: 'pending',
-      // Each need has its own status
-      needs: needTypes.map(nt => ({ needType: nt, status: 'sent', claimedBy: null })),
+      reporterCount: 1,
+      duplicateCount: 0,
+      flags: [],
       createdAt: new Date().toISOString(),
       reportedBy: user?.id,
       clientId,
@@ -128,87 +136,53 @@ export function useReports(role = 'citizen') {
     setReports(prev => [optimistic, ...prev])
     try {
       const { data } = await reportsApi.create(payload)
+      const saved = normalizeReport(data)
       setReports(prev => {
-        const next = prev.map(r => r.id === optimistic.id ? data : r)
+        const next = prev.map(r => r.id === optimistic.id ? saved : r)
         cacheSet(role, next)
         return next
       })
-      return { success: true, report: data }
+      return { success: true, report: saved }
     } catch (err) {
       setReports(prev => prev.filter(r => r.id !== optimistic.id))
       throw err
     }
   }, [isOnline, enqueue, user, role])
 
+  // Apply a server-returned report (claim/release/status) to local state + cache.
+  const applyServerReport = useCallback((reportId, raw) => {
+    const nu = normalizeReport(raw)
+    if (!nu) return
+    setReports(prev => {
+      const next = prev.map(r => r.id === reportId ? { ...r, ...nu } : r)
+      cacheSet(role, next)
+      return next
+    })
+  }, [role])
+
   // Claim a specific need type in a report (NOT optimistic)
   const claimNeed = useCallback(async (reportId, needType) => {
     try {
-      // Try per-need endpoint, fall back to legacy
-      let res
-      try {
-        res = await reportsApi.claimNeed(reportId, needType)
-      } catch {
-        res = await reportsApi.claim(reportId)
-      }
-      setReports(prev => {
-        const next = prev.map(r => {
-          if (r.id !== reportId) return r
-          const needs = (r.needs || []).map(n =>
-            n.needType === needType
-              ? { ...n, status: 'claimed', claimedBy: user?.id }
-              : n
-          )
-          return { ...r, needs, status: res.data?.status || r.status }
-        })
-        cacheSet(role, next)
-        return next
-      })
+      const res = await reportsApi.claimNeed(reportId, needType)
+      applyServerReport(reportId, res.data)
       return { success: true }
     } catch (err) {
       if (err.response?.status === 409) return { alreadyClaimed: true }
       throw err
     }
-  }, [user, role])
+  }, [applyServerReport])
 
   const releaseNeed = useCallback(async (reportId, needType) => {
-    try {
-      try { await reportsApi.releaseNeed(reportId, needType) }
-      catch { await reportsApi.release(reportId) }
-      setReports(prev => {
-        const next = prev.map(r => {
-          if (r.id !== reportId) return r
-          const needs = (r.needs || []).map(n =>
-            n.needType === needType ? { ...n, status: 'pending', claimedBy: null } : n
-          )
-          return { ...r, needs }
-        })
-        cacheSet(role, next)
-        return next
-      })
-      return { success: true }
-    } catch (err) {
-      throw err
-    }
-  }, [role])
+    const res = await reportsApi.releaseNeed(reportId, needType)
+    applyServerReport(reportId, res.data)
+    return { success: true }
+  }, [applyServerReport])
 
   const updateNeedStatus = useCallback(async (reportId, needType, status) => {
-    try {
-      try { await reportsApi.needStatus(reportId, needType, status) }
-      catch { await reportsApi.status(reportId, status) }
-      setReports(prev => {
-        const next = prev.map(r => {
-          if (r.id !== reportId) return r
-          const needs = (r.needs || []).map(n =>
-            n.needType === needType ? { ...n, status } : n
-          )
-          return { ...r, needs, status: needs.every(n => n.status === 'resolved') ? 'resolved' : r.status }
-        })
-        cacheSet(role, next)
-        return next
-      })
-      return { success: true }
-    } catch (err) { throw err }
-  }, [role])
+    const res = await reportsApi.needStatus(reportId, needType, status)
+    applyServerReport(reportId, res.data)
+    return { success: true }
+  }, [applyServerReport])
 
   // Retry queued reports on reconnect
   useEffect(() => {
@@ -227,9 +201,9 @@ export function useReports(role = 'citizen') {
     return () => window.removeEventListener('aidpulse:retry-queue', handler)
   }, [dequeue, fetch])
 
-  const myReports = role === 'citizen'
-    ? reports.filter(r => r.reportedBy === user?.id)
-    : reports
+  // /reports/mine is already scoped to the caller (and hides reportedBy for
+  // citizens), so the fetched list *is* "my reports".
+  const myReports = reports
 
   return {
     reports,

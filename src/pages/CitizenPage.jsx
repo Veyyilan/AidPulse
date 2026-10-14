@@ -94,7 +94,7 @@ function NeedStatusList({ needs }) {
 function MyReportsList({ reports, queue }) {
   const queuedReports = queue.map(q => ({
     id: 'q-' + q.id,
-    needs: (q.payload?.needTypes || []).map(nt => ({ needType: nt, status: '_queued' })),
+    needs: (q.payload?.needs || []).map(nt => ({ needType: nt, status: '_queued' })),
     lat: q.payload?.lat, lng: q.payload?.lng,
     createdAt: q.queuedAt,
     _queued: true,
@@ -191,10 +191,9 @@ export default function CitizenPage() {
     setSubmitting(true)
     try {
       const result = await submit({
-        needTypes: selectedNeeds,
+        needs: selectedNeeds,
         lat, lng,
         accuracyMeters: position?.accuracy ?? null,
-        locationSource: position?.source || 'manual',
       })
       setSelectedNeeds([])
       if (result.queued) {
@@ -257,7 +256,7 @@ export default function CitizenPage() {
       {/* Map — always visible on top, interactive */}
       <div style={{ flex: '0 0 45dvh', position: 'relative' }}>
         <AidMap
-          reports={[]}
+          reports={myReports}
           center={mapCenter}
           zoom={mapZoom}
           height="100%"
